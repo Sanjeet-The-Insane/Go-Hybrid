@@ -470,9 +470,21 @@ impl Emitter {
                 }
             }
             self.shadow_local_names(&l.names);
+            for name in &l.names {
+                if name != "_" {
+                    self.flush_loan_for_name(name);
+                }
+            }
             for (loan_name, _) in &new_loans {
                 self.bindings.insert(loan_name.clone(), BindingKind::Plain);
-                self.flush_loan_for_name(loan_name);
+            }
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if name != "_"
+                    && Self::as_slot_loan_operand(v).is_none()
+                    && self.expr_is_pointer(v)
+                {
+                    self.pointer_vars.insert(name.clone());
+                }
             }
             self.push(&format!(
                 "{} := {}",
@@ -3511,5 +3523,63 @@ impl Emitter {
                 .any(|s| Self::stmt_modifies_ident(s, target)),
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::emit_go;
+    use hy_syntax::parse_file;
+
+    #[test]
+    fn parallel_short_redecl_with_sibling_slot_loan_flushes_old_loan_before_rebind() {
+        let src = r#"
+struct item {
+    inner map[int]int
+    tag int
+}
+
+fn worker(m map[string]item, ch chan int) {
+    ch <- 1
+    it := m["a"]
+    for i in 0..10 {
+        it.inner[i] = i
+    }
+    ch <- 2
+}
+
+fn main() {
+    ch := make(chan int)
+    shared := map[int]int{0: 0}
+    m := map[string]item{"a": item{inner: map[int]int{0: 1}, tag: 7}}
+    m2 := map[string]item{"b": item{inner: map[int]int{0: 2}, tag: 8}}
+    q := &m["a"]
+    q, r := item{inner: shared, tag: q.tag}, &m2["b"]
+    _ = q
+    _ = r
+    task worker(move m, ch)
+    <-ch
+    shared[1] = 99
+    <-ch
+}
+"#;
+        let ast = parse_file("test.hy", src).expect("source must parse");
+        let go = emit_go(&ast).expect("must emit Go");
+        let flush_pos = go.find("m[\"a\"] = q").expect("must flush old loan on q");
+        let redecl_pos = go
+            .find("q, r := item{inner: shared, tag: q.tag}, m2[\"b\"]")
+            .expect("must emit parallel short decl");
+        let spawn_pos = go.find("go worker(m, ch)").expect("must emit spawn");
+        assert!(
+            flush_pos < redecl_pos && redecl_pos < spawn_pos,
+            "old slot loan `m[\"a\"] = q` must flush BEFORE `q, r := ...` overwrites `q`, got:\n{}",
+            go
+        );
+        assert_eq!(
+            go.matches("m[\"a\"] = q").count(),
+            1,
+            "must flush `m[\"a\"] = q` exactly once, got:\n{}",
+            go
+        );
     }
 }
