@@ -1101,13 +1101,26 @@ impl<'a> Collector<'a> {
             }
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
+                // #887: a spawn argument sits in a single-value position
+                // exactly like a call argument does. Without this,
+                // `task worker(noop())` (void call) and
+                // `task worker(pair())` (two values) passed the checker
+                // and emitted Go that cannot build.
+                //
+                // The #682 U7 exception applies to a spawn exactly as it does
+                // to a call: a lone multi-value call IS the whole argument
+                // list when the callee takes that many parameters, so
+                // `go w(pair())` builds for a 2-param `w`. Rejecting it here
+                // made the checker refuse legal Go. When the shape is taken,
+                // the arity is what decides, and that is checked below.
+                if self.multi_value_arg_count(args).is_none() {
+                    for a in args {
+                        self.check_single_value_position(&a.value, "a spawn argument", false);
+                    }
+                } else {
+                    self.check_multi_value_arg_arity(callee, args, *span);
+                }
                 for a in args {
-                    // #887: a spawn argument sits in a single-value position
-                    // exactly like a call argument does. Without this,
-                    // `task worker(noop())` (void call) and
-                    // `task worker(pair())` (two values) passed the checker
-                    // and emitted Go that cannot build.
-                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
