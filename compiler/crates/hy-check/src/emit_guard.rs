@@ -109,7 +109,7 @@ impl<'a> Checker<'a> {
                 if deep {
                     if matches!(l.kind, hy_syntax::LocalKind::Const) {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
-                            self.check_const_init_is_constant(name, value, Some(st));
+                            self.check_const_init_is_constant(name, l.ty.as_ref(), value, Some(st));
                         }
                     }
                     if let Some(ty) = &l.ty {

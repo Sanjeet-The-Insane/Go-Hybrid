@@ -1501,7 +1501,7 @@ impl<'a> Checker<'a> {
         // Issue #205: reject non-constant `const` initializers (emitter keeps Go `const`).
         if matches!(l.kind, LocalKind::Const) {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
-                self.check_const_init_is_constant(name, value, Some(st));
+                self.check_const_init_is_constant(name, l.ty.as_ref(), value, Some(st));
             }
         }
         if l.values.is_empty() {
