@@ -937,7 +937,9 @@ impl<'a> Checker<'a> {
             );
         }
         // -- C: method-set duplication (`method box.get already declared`) --
-        let base = r.ty.render();
+        let base = Self::base_named_type(&r.ty)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r.ty.render());
         if !self.methods.insert((base.clone(), f.name.clone())) {
             let msg = format!("method `{}.{}` already declared (HYB-E1003)", base, f.name);
             self.diags.push(
@@ -1220,7 +1222,7 @@ impl<'a> Checker<'a> {
         }
         // 2b) A boolean, string, or comparison/logical expression (`[true]int`,
         // `[!true]int`, `[1 == 2]int`, `["hi"]int`) is never an integer length.
-        if is_non_int_array_len_expr(len) {
+        if self.is_non_int_array_len_expr(len) {
             let msg = format!(
                 "array length `{}` is not an integer constant — Go rejects this (`invalid array length`), so the emitted module would not build (HYB-E6004)",
                 len.render()
@@ -1273,7 +1275,7 @@ impl<'a> Checker<'a> {
                         .resolve_local_binding_at(name, span.start)
                         .and_then(|sight| {
                             let init_expr = sight.constant_initializer()?;
-                            if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                            if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
                                 return None;
                             }
                             self.const_int_value_at(init_expr, sight.pos, 0)
@@ -1371,11 +1373,11 @@ impl<'a> Checker<'a> {
             return true;
         };
         if let Some(ty) = &d.ty {
-            if is_non_int_primitive_type(ty) {
+            if self.is_non_int_type(ty) {
                 return false;
             }
         }
-        if is_non_int_array_len_expr(&d.value) {
+        if self.is_non_int_array_len_expr(&d.value) {
             return false;
         }
         if const_float_value(&d.value).is_some_and(|f| f.fract() != 0.0) {
@@ -1404,7 +1406,7 @@ impl<'a> Checker<'a> {
             hy_syntax::Decl::Const(c) if c.name == name => Some(c),
             _ => None,
         })?;
-        if d.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+        if d.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
             return None;
         }
         self.const_int_value_at(&d.value, d.span.start, depth + 1)
@@ -1434,7 +1436,7 @@ impl<'a> Checker<'a> {
             } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if let Some(next_val) = sight.constant_initializer() {
-                        if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                        if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
                             return None;
                         }
                         if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
@@ -1482,8 +1484,10 @@ impl<'a> Checker<'a> {
                 if fn_name == "len" {
                     return self.const_string_len_at(&args[0].value, use_pos, depth);
                 }
-                if self.is_int_conversion_name(fn_name) {
-                    return self.const_int_value_at(&args[0].value, use_pos, depth);
+                if let Some(target) = self.resolve_int_conversion_name(fn_name) {
+                    return self
+                        .const_int_value_at(&args[0].value, use_pos, depth)
+                        .map(|v| wrap_int_conversion(v, &target));
                 }
                 None
             }
@@ -1532,17 +1536,37 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn is_int_conversion_name(&self, name: &str) -> bool {
+    fn resolve_int_conversion_name(&self, name: &str) -> Option<String> {
         if is_int_primitive_type_name(name) {
-            return true;
+            return Some(name.to_string());
         }
-        if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
-            if let TypeExpr::Named { name: target, .. } = resolved {
-                return is_int_primitive_type_name(&target);
+        let ty = self.type_aliases.get(name)?;
+        if let TypeExpr::Named { name: target, .. } = self.resolve_type_alias(ty) {
+            if is_int_primitive_type_name(&target) {
+                return Some(target);
             }
         }
-        false
+        None
+    }
+
+    fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
+        let resolved = self.resolve_type_alias(ty);
+        is_non_int_primitive_type(&resolved)
+    }
+
+    fn is_non_int_array_len_expr(&self, expr: &Expr) -> bool {
+        if let Expr::Call { callee, .. } = unwrap_parens(expr) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if !self.fns.contains_key(name.as_str()) {
+                    if let Some(ty) = self.type_aliases.get(name.as_str()) {
+                        if self.is_non_int_type(ty) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        is_non_int_array_len_syntax(expr)
     }
 
     /// The binding `name` has at `use_pos`, when it is a local of the enclosing
@@ -2522,18 +2546,41 @@ fn span_contains(span: Span, pos: hy_diag::Pos) -> bool {
         && (pos.line, pos.col) <= (span.end.line, span.end.col)
 }
 
+fn wrap_int_conversion(v: i128, target: &str) -> i128 {
+    match target {
+        "i8" | "int8" => (v as i8) as i128,
+        "i16" | "int16" => (v as i16) as i128,
+        "i32" | "int32" | "rune" => (v as i32) as i128,
+        "i64" | "int64" | "int" | "isize" => (v as i64) as i128,
+        "u8" | "uint8" | "byte" => (v as u8) as i128,
+        "u16" | "uint16" => (v as u16) as i128,
+        "u32" | "uint32" => (v as u32) as i128,
+        "u64" | "uint64" | "uint" | "uintptr" | "usize" => (v as u64) as i128,
+        _ => v,
+    }
+}
+
 fn is_non_int_primitive_type(ty: &TypeExpr) -> bool {
     matches!(
         ty,
         TypeExpr::Named { name, .. }
             if matches!(
                 name.as_str(),
-                "bool" | "string" | "float32" | "float64" | "error"
+                "bool"
+                    | "string"
+                    | "float32"
+                    | "float64"
+                    | "f32"
+                    | "f64"
+                    | "complex64"
+                    | "complex128"
+                    | "error"
+                    | "any"
             )
     )
 }
 
-fn is_non_int_array_len_expr(expr: &Expr) -> bool {
+fn is_non_int_array_len_syntax(expr: &Expr) -> bool {
     match unwrap_parens(expr) {
         Expr::Lit {
             kind:
@@ -2577,6 +2624,8 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
                         | "string"
                         | "float32"
                         | "float64"
+                        | "f32"
+                        | "f64"
                         | "complex64"
                         | "complex128"
                         | "complex"
@@ -2646,9 +2695,15 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "uint64"
             | "float32"
             | "float64"
+            | "f32"
+            | "f64"
+            | "complex64"
+            | "complex128"
             | "byte"
             | "rune"
             | "char"
             | "error"
+            | "any"
+            | "comparable"
     )
 }
