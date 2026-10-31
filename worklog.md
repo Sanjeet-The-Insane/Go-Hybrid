@@ -992,3 +992,31 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - #1811 rechecked: head unchanged (8a1f058) — the invited one-hunk fix (alias -> conversion-target fallthrough) has not been pushed; session 31 evidence reply stands.
 - Suite trajectory: 200 -> 209. Final main 2c527a1, tree clean.
 - NEXT TICK QUEUE: #2295 (Yumihariii user-struct field chains recursive), #2604 (ket4min-susan closure capture move-freeze), #1811 (await one-hunk), #2292/#2291 (Yumihariii rejects), #391 (aged ocakciomursel-pixel const-pointer immutability), #2486/#2503/#2300/#2494 (ocakciomursel-pixel generics batch), #2417/#2481 (ket4min-susan spikes), #1675 (enums, 769 lines), #1715 (wildcard spike), #2467/#2432 (aging).
+
+## Session 33 — 2026-11-01 early morning (tick 487193: 3 landed, 1 gate-fail evidence, 1 rebase ask)
+
+- Sandbox recycled (14th; toolchains re-restored, cold rebuild inside first verify). Baseline fdb0c44 (own session-32 worklog; no parallel advancement). Scan OK on first try; approve 40/78.
+- LANDED:
+  33cb3ae Merge PR #2608 (ket4min-susan, fixes #2607) — slot-loan rebind guard now covers same-scope := redecl (Stmt::Local define-form via current_scope_binding, pre-process_local so the OLD binding's slot_loan flag is tested); emitter flushes legal-shape rebinds' old loans. 210 suites.
+  1e90bad Merge PR #2604 (ket4min-susan, fixes #2603) — closure capture move-freeze survives same-scope redecl/rebind: prev_moved carried into fresh binding + closure-peer share edges re-established after share_clear. 211 suites.
+  39cf5bb Merge PR #2486 (ocakciomursel-pixel, fixes #2485) — generic struct type args preserved across fn-boundary/alias/sendability/freeze/loan checks (box[set[int]] keeps inner shape everywhere). 212 suites.
+- GATE FAIL (evidence reply, not landed): #391 (ocakciomursel-pixel, 14.5d, kept 0-behind via 5 upstream merges) — CARGO-FAIL: spike6_programs_all_accept_with_zero_errors; 05-json-transform.hy (pinned POSITIVE) now rejects 2x HYB-E3003 at 61:5 (v.set) + 62:12 (return v) — new receiver-consumption path consumes the Mutate receiver of serde_json.value.set. Suspects: loans.rs receiver hunks (r.is_pointer/recv_const ~6838, new ~190/~319), foreign.rs package_mode/method_result table edits. hyrt ABA half NOT implicated. Fix direction given; invited same-tick re-land; split option (hyrt-only first) offered.
+- REBASE ASK (conflict, not landed): #2503 (ocakciomursel-pixel) — MERGE-CONFLICT vs freshly-landed #2486 in loans.rs/sendability.rs/shape.rs (changed-in-both; semantic overlap, not textual). Asked author to rebase; re-verify + land same-tick on push.
+- #1811 rechecked again: head unchanged (8a1f058) — invited one-hunk fix still not pushed; session-31 evidence stands.
+- All three landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (#2608 #2604 #2486 landings, #391 evidence, #2503 rebase ask).
+- Suite trajectory: 209 -> 212. Final main 39cf5bb, tree clean.
+- NEXT TICK QUEUE: #2503 (after rebase) -> #2300 -> #2494 -> #2321 (ocakciomursel-pixel line), #2417/#2481 (ket4min-susan spikes, 373/1308 lines), #1675 (enums 769 lines), #391 (await fix), #1811 (await one-hunk), #2467/#2432/#2292/#2291/#391-siblings (aging), fresh conflicts #2606/#2509/#2529 (rebase asks if still silent).
+
+## Session 34 — 2026-11-01 morning (tick 487193: 5 landed, 0 gate-fails)
+
+- Sandbox recycled (15th; toolchains re-restored, cold rebuild inside first verify). Baseline f75d775 (own session-33 worklog). Scan OK; approve 40/72. harmweber787-png wave surfaced: a dozen+ self-contained spike/verifier PRs (docs/spikes + spikes/<name>/ + pytest), all 0-behind, all pure-additive.
+- LANDED:
+  429383b Merge PR #2067 (tomaslizak, fixes #2066) — check_addr_of_loan fires on via_move (task w(move s), ch <- move s -> E3104); Send is_move synthesizes the Use; is_slot_loan_expr type-checks base-path root vs binding shape (detached copies stay accepted). 213 suites.
+  99a52e1 Merge PR #2095 (harmweber787-png, fixes #1931) — W-1931 demand-paged stack pool verifier; criterion pytest 4/4. 213 suites.
+  bc7a0a2 Merge PR #2094 (harmweber787-png, fixes #1935) — W-1935 three-stage place-graph verifier; pytest spikes/ 7/7. 213 suites.
+  9802047 Merge PR #2093 (harmweber787-png, fixes #1937) — W-1937 bounded generation arena; pytest spikes/ 8/8. 213 suites.
+  9f5626b Merge PR #2091 (harmweber787-png, fixes #1942) — W-1942 fuel capsule; pytest spikes/ 8/8. 213 suites.
+- Wave flow refined: verify_pr.sh runs in /tmp/verify-wt and REMOVES it at exit — PR-own pytest criterion needs its own temp worktree (git worktree add --detach /tmp/vw pr-N; pytest; remove). All wave PRs: verify ALL-GREEN + criterion PASS + merge + push + ls-remote==HEAD + written reply.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), written replies posted.
+- Suite trajectory: 212 -> 213 (#2067's new suite). Final main 9f5626b, tree clean.
+- NEXT TICK QUEUE (wave continues, same flow): #2085 (w1933 Go AST emission gate) -> #2084 (w1928 go/types witness arbiter) -> #2081 (w2009 recover/defer) -> #2079 (w2049 asm leaf emitter) -> #2083 (w1929 CloseRight) -> #2082 (w1963 sendability proof) -> #2080 (w2015 GoBench census) -> #2077/#2078/#2075/#2076/#2074/#2073/#1856/#1893/#1855/#1914 (same series) -> #2295/#2292/#2291 (Yumihariii) -> #2503 (await rebase) -> #2300/#2494/#2321 -> #391 (await fix) -> #1811 (behind 13 now, await one-hunk + rebase).
