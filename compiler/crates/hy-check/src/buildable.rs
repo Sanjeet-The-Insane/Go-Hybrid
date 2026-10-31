@@ -368,6 +368,7 @@ struct Define {
     used: bool,
     written: bool,
     elidable: bool,
+    is_untyped: bool,
 }
 
 struct Collector<'a> {
@@ -381,6 +382,7 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -416,6 +418,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -434,6 +437,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if cd.ty.is_none() {
+                    c.file_untyped_consts.insert(cd.name.clone());
+                }
             }
         }
         for d in &file.decls {
@@ -527,6 +533,7 @@ impl<'a> Collector<'a> {
             used: false,
             written: false,
             elidable: true,
+            is_untyped: false,
         });
         top.insert(name.to_string(), Some(id));
     }
@@ -941,6 +948,7 @@ impl<'a> Collector<'a> {
                 used: false,
                 written: false,
                 elidable: false,
+                is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
         }
@@ -2394,7 +2402,12 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    let is_untyped_int_to_float = want == OpKind::Float
+                        && got == OpKind::Int
+                        && self.is_untyped_int_const(&f.value);
+                    let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&want, &got);
+                    if conflict {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2811,7 +2824,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(&values[0], r, w, values[0].span());
                         }
                         return;
                     }
@@ -2820,7 +2833,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(&values[0], r, w, values[0].span());
                         }
                         return;
                     }
@@ -2867,7 +2880,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(v, &got, w, v.span());
                 }
                 return;
             }
@@ -2895,12 +2908,17 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(v, &got, w, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) {
+        let is_untyped_int_to_float = *want == OpKind::Float
+            && *got == OpKind::Int
+            && self.is_untyped_int_const(val);
+        let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
+            || kinds_conflict(want, got);
+        if !conflict {
             return;
         }
         self.emit_e1002(
@@ -3403,7 +3421,12 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let is_untyped_int_to_float = tk == OpKind::Float
+                        && vk == OpKind::Int
+                        && self.is_untyped_int_const(&values[0]);
+                    let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&tk, &vk);
+                    if !is_loan_shape && conflict {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3441,7 +3464,12 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        let is_untyped_int_to_float = tpk == OpKind::Float
+                            && vk == OpKind::Int
+                            && self.is_untyped_int_const(v);
+                        let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                            || kinds_conflict(&tpk, &vk);
+                        if conflict {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3806,6 +3834,50 @@ impl<'a> Collector<'a> {
                     "the lower slice bound `lo` in `x[lo:hi]` must satisfy `lo <= hi`",
                 );
             }
+        }
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let d = &self.defines[*id];
+                        if d.kind == LocalKind::Const && d.is_untyped {
+                            return self.lookup_kind(name) == Some(OpKind::Int);
+                        }
+                        return false;
+                    }
+                }
+                if self.file_untyped_consts.contains(name) {
+                    return self.file_consts.get(name) == Some(&OpKind::Int);
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_int_const(lhs)
+                    && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
         }
     }
 
