@@ -6,6 +6,7 @@ use super::{to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
+use std::collections::BTreeSet;
 
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
@@ -189,6 +190,7 @@ impl Emitter {
                 self.indent += 1;
                 for arm in arms {
                     let saved_scope = self.save_scope();
+                    let mut wrap = false;
                     match &arm.kind {
                         SelectArmKind::Recv { names, chan } => {
                             let c = match self.emit_expr(chan, 0) {
@@ -246,6 +248,38 @@ impl Emitter {
                             };
                             self.shadow_local_names(names);
                             self.push(&head);
+                            // Go's case clause shares ONE lexical scope with
+                            // its bindings (`case v := <-ch:`); a body that
+                            // re-declares a case-bound name at its top level
+                            // (`v := v + 1`) compiles as `no new variables on
+                            // left side of :=`. When a name actually bound in
+                            // this clause is re-declared top-level, wrap the
+                            // arm body in an explicit block — legal Go (block
+                            // braces inside a case clause, verified against
+                            // go1.27.2) and preserves the Hybrid arm-scoped
+                            // shadow semantics. Same check-vs-emit shape
+                            // class as the match-arm lowering, on select's
+                            // separate lowering path; deliberately uses its
+                            // own helper name.
+                            let bound: Vec<&str> = if names.len() == 1 {
+                                if names[0] != "_"
+                                    && crate::rangebind::body_reads(&arm.body, &names[0])
+                                {
+                                    vec![names[0].as_str()]
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                names
+                                    .iter()
+                                    .filter(|n| {
+                                        n.as_str() != "_"
+                                            && crate::rangebind::body_reads(&arm.body, n)
+                                    })
+                                    .map(|n| n.as_str())
+                                    .collect()
+                            };
+                            wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
@@ -254,7 +288,13 @@ impl Emitter {
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
+                    if wrap {
+                        self.push("{");
+                    }
                     let arm_res = self.emit_block_body(&arm.body.stmts);
+                    if wrap {
+                        self.push("}");
+                    }
                     self.restore_scope(saved_scope);
                     arm_res?;
                 }
@@ -1695,6 +1735,21 @@ impl Emitter {
         r
     }
 
+    /// True when a select receive-arm body re-declares one of the names
+    /// actually bound by its case clause at the body's top level. Only the
+    /// flat top level matters: Go puts the case bindings and the body in the
+    /// same clause scope, while a `Stmt::Block` inside the body emits its own
+    /// braces (a fresh Go scope) and can never conflict.
+    fn case_body_redefines_binding(stmts: &[Stmt], bound: &[&str]) -> bool {
+        if bound.is_empty() {
+            return false;
+        }
+        stmts.iter().any(|s| match s {
+            Stmt::Local(l) => l.names.iter().any(|n| bound.contains(&n.as_str())),
+            _ => false,
+        })
+    }
+
     fn block_terminates(b: &Block) -> bool {
         b.stmts.iter().any(Self::stmt_terminates)
     }
@@ -2611,6 +2666,7 @@ impl Emitter {
                 Expr::Lit { .. } => false,
                 Expr::Ident { name, .. } => {
                     name == loan_var
+                        || self.closure_written.contains(name)
                         || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
                 }
                 _ => true,
@@ -3234,6 +3290,166 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn collect_closure_writes_block(
+        b: &Block,
+        in_closure: bool,
+        out: &mut BTreeSet<String>,
+    ) {
+        for s in &b.stmts {
+            Self::collect_closure_writes_stmt(s, in_closure, out);
+        }
+    }
+
+    fn collect_closure_writes_stmt(s: &Stmt, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match s {
+            Stmt::Local(l) => l.values.iter().for_each(|v| ex(v, out)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if in_closure {
+                        out.insert(t.root().to_string());
+                    }
+                    Self::collect_closure_writes_place(t, in_closure, out);
+                }
+                values.iter().for_each(|v| ex(v, out));
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => ex(expr, out),
+            Stmt::Send { chan, value, .. } => {
+                ex(chan, out);
+                ex(value, out);
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_closure_writes_stmt(i, in_closure, out);
+                }
+                ex(cond, out);
+                Self::collect_closure_writes_block(then, in_closure, out);
+                if let Some(o) = otherwise {
+                    Self::collect_closure_writes_stmt(o, in_closure, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => ex(cond, out),
+                    ForKind::Range { lo, hi, .. } => {
+                        ex(lo, out);
+                        ex(hi, out);
+                    }
+                    ForKind::Iterate { expr, .. } => ex(expr, out),
+                    ForKind::Infinite => {}
+                }
+                Self::collect_closure_writes_block(body, in_closure, out);
+            }
+            Stmt::Return { values, .. } => values.iter().for_each(|v| ex(v, out)),
+            Stmt::Task { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::collect_closure_writes_block(body, in_closure, out)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                ex(subject, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        ex(g, out);
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            ex(chan, out);
+                            ex(value, out);
+                        }
+                        SelectArmKind::Recv { chan, .. } => ex(chan, out),
+                        SelectArmKind::Default => {}
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_closure_writes_place(p: &Place, in_closure: bool, out: &mut BTreeSet<String>) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_closure_writes_place(base, in_closure, out)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::collect_closure_writes_place(base, in_closure, out);
+                Self::collect_closure_writes_expr(index, in_closure, out);
+            }
+        }
+    }
+
+    fn collect_closure_writes_expr(e: &Expr, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match e {
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { body, .. } => Self::collect_closure_writes_block(body, true, out),
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        ex(x, out);
+                    }
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                ex(lhs, out);
+                ex(rhs, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => ex(operand, out),
+            Expr::Index { base, index, .. } => {
+                ex(base, out);
+                ex(index, out);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                ex(base, out);
+                if let Some(l) = lo {
+                    ex(l, out);
+                }
+                if let Some(h) = hi {
+                    ex(h, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|f| ex(&f.value, out)),
+            Expr::SliceLit { items, .. } => items.iter().for_each(|i| ex(i, out)),
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    ex(k, out);
+                    ex(v, out);
+                }
+            }
+        }
+    }
+
     fn stmt_modifies_ident(st: &Stmt, target: &str) -> bool {
         match st {
             Stmt::Local(l) => l.names.iter().any(|n| n == target),
@@ -3270,16 +3486,24 @@ impl Emitter {
                         .any(|s| Self::stmt_modifies_ident(s, target))
             }
             Stmt::Match { arms, .. } => arms.iter().any(|a| {
-                a.body
+                matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == target
+                ) || a
+                    .body
                     .stmts
                     .iter()
                     .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
-                a.body
-                    .stmts
-                    .iter()
-                    .any(|s| Self::stmt_modifies_ident(s, target))
+                Self::select_arm_binds(&a.kind, target)
+                    || a.body
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
                 .stmts
