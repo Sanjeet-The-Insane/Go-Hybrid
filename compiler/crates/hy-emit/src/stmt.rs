@@ -612,10 +612,14 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            match callee {
+            let mut inner = callee;
+            while let Expr::Paren { inner: p, .. } = inner { inner = p; }
+            match inner {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
-                Expr::Call { .. } => self.hoist_order_before_try(callee)?,
-                _ => self.hoist_tries_expr(callee)?,
+                Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
+                    self.hoist_tries_expr(callee)?
+                }
+                _ => self.hoist_order_before_try(callee)?,
             }
         } else {
             self.hoist_tries_expr(callee)?;
@@ -1382,10 +1386,63 @@ impl Emitter {
         }
     }
 
+    pub fn type_of_place(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
+                    return Some(t);
+                }
+                if let Some((ty, _)) = self.var_ty.get(name) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            PlaceKind::Field { base, name } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                if let PlaceKind::Ident(vn) = &base.kind {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                if let Some((k, _)) =
+                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                                {
+                                    return Some(k);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.type_of_place(base),
+            PlaceKind::Index { .. } => None,
+        }
+    }
+
     /// Member-name normalization for a PLACE (assignment target). Same rule
-    /// as the expression side: foreign package roots and Foreign bindings
-    /// normalize; our own members stay verbatim.
+    /// as the expression side: shape-table members (including MethodZero
+    /// `w.header[k] = v` -> `w.Header()[k] = v` and foreign fields nested
+    /// inside user structs `ctx.req.host = ...` -> `ctx.req.Host = ...`)
+    /// resolve first; foreign package roots and Foreign bindings normalize;
+    /// our own struct members stay verbatim.
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
+        if let Some(t) = self.type_of_place(base) {
+            if let Some(m) = super::shapes::lookup_member(t, name) {
+                return match m.kind {
+                    super::shapes::MemberKind::Field | super::shapes::MemberKind::Method => {
+                        m.go.to_string()
+                    }
+                    super::shapes::MemberKind::MethodZero => format!("{}()", m.go),
+                };
+            }
+            return super::to_go_name(name);
+        }
         let root = base.root();
         if self.is_unshadowed_pkg_root(root)
             || matches!(
@@ -2214,7 +2271,69 @@ impl Emitter {
                 _ => false,
             };
 
-        if simple_unguarded_chain {
+        let needs_ordered_arms = classified.iter().any(|(k, a)| !matches!(k, ArmKind::Some(_)) && a.guard.is_some())
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::NoneArm)).count() > 1
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::Wildcard)).count() > 1
+            || classified.iter().position(|(k, _)| matches!(k, ArmKind::Wildcard))
+                .is_some_and(|wi| classified[wi + 1..].iter().any(|(k, _)| !matches!(k, ArmKind::Wildcard)));
+        if needs_ordered_arms {
+            let matched = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched));
+            let mut exhausted = false;
+            for (kind, arm) in &classified {
+                let (cond, bind) = match kind {
+                    ArmKind::Some(b) => (format!("!{} && {}.ok", matched, temp), Some(b.as_str())),
+                    ArmKind::NoneArm => (format!("!{} && !{}.ok", matched, temp), None),
+                    ArmKind::Wildcard => (format!("!{}", matched), None),
+                };
+                self.push(&format!("if {} {{", cond));
+                self.indent += 1;
+                let saved = self.save_scope();
+                if let Some(b) = bind { self.shadow_local_name(b); }
+                let res = (|| -> Result<(), EmitError> {
+                    if let Some(g) = &arm.guard {
+                        let greads = bind.is_some_and(|b| b != "_" && crate::rangebind::expr_reads(g, b));
+                        if let Some(b) = bind.filter(|_| greads) { self.push(&format!("{} := {}.val", b, temp)); }
+                        self.hoist_tries_expr(g)?;
+                        let gt = self.emit_expr(g, 0)?;
+                        self.push(&format!("if {} {{", gt));
+                        self.indent += 1;
+                        self.push(&format!("{} = true", matched));
+                        if let Some(b) = bind.filter(|b| *b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b)) {
+                            self.push(&format!("{} := {}.val", b, temp));
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        self.indent -= 1;
+                        self.push("}");
+                    } else {
+                        self.push(&format!("{} = true", matched));
+                        if let Some(b) = bind.filter(|b| *b != "_" && crate::rangebind::body_reads(&arm.body, b)) {
+                            self.push(&format!("{} := {}.val", b, temp));
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                    }
+                    Ok(())
+                })();
+                self.restore_scope(saved);
+                self.indent -= 1;
+                self.push("}");
+                res?;
+                if matches!(kind, ArmKind::Wildcard) && arm.guard.is_none() { exhausted = true; break; }
+            }
+            if !exhausted {
+                if let Some(inherited) = self.branch_inherit.clone() {
+                    self.push(&format!("if !{} {{", matched));
+                    self.indent += 1;
+                    for (_, store) in inherited { self.push(&store); }
+                    self.indent -= 1;
+                    self.push("}");
+                }
+            }
+            let covers_all = exhausted || (has_unguarded_some && classified.iter().any(|(k, a)| matches!(k, ArmKind::NoneArm) && a.guard.is_none()));
+            if covers_all && classified.iter().all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))) {
+                self.push("panic(\"unreachable\")");
+            }
+        } else if simple_unguarded_chain {
             let else_arm = none_arm.or(wildcard_arm);
             self.push(&format!("if {}.ok {{", temp));
             self.indent += 1;
