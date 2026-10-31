@@ -1343,13 +1343,26 @@ impl<'a> Collector<'a> {
             }
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
+                // #887: a spawn argument sits in a single-value position
+                // exactly like a call argument does. Without this,
+                // `task worker(noop())` (void call) and
+                // `task worker(pair())` (two values) passed the checker
+                // and emitted Go that cannot build.
+                //
+                // The #682 U7 exception applies to a spawn exactly as it does
+                // to a call: a lone multi-value call IS the whole argument
+                // list when the callee takes that many parameters, so
+                // `go w(pair())` builds for a 2-param `w`. Rejecting it here
+                // made the checker refuse legal Go. When the shape is taken,
+                // the arity is what decides, and that is checked below.
+                if self.multi_value_arg_count(args).is_none() {
+                    for a in args {
+                        self.check_single_value_position(&a.value, "a spawn argument", false);
+                    }
+                } else {
+                    self.check_multi_value_arg_arity(callee, args, *span);
+                }
                 for a in args {
-                    // #887: a spawn argument sits in a single-value position
-                    // exactly like a call argument does. Without this,
-                    // `task worker(noop())` (void call) and
-                    // `task worker(pair())` (two values) passed the checker
-                    // and emitted Go that cannot build.
-                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
@@ -2398,7 +2411,30 @@ impl<'a> Collector<'a> {
             },
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_kind(&bk, name).unwrap_or(OpKind::Unknown)
+                if let Some(k) = self.struct_field_kind(&bk, name) {
+                    return k;
+                }
+                // #682 U1: a method value (`f := z.add`) is a function value
+                // whose receiver is already bound, so its arity is the
+                // declaration's parameter count — exactly what `OpKind::Fn`'s
+                // count slot carries for closures. Without this the binding
+                // fell through to `Unknown` (fail-open) and `f(1, 2)` reached
+                // emission, where Go refuses `too many arguments in call to f`.
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return OpKind::Fn(
+                                m.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                                Some(m.params.len()),
+                            );
+                        }
+                    }
+                }
+                OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
                 .as_ref()
