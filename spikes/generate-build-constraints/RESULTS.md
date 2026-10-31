@@ -98,3 +98,20 @@ the tested source, tests, manifest and lockfile bytes. Hosted checks for the
 refreshed PR, maintainer review and any discretionary award remain pending.
 
 Contributor: Dima Mak / ub3dqy.
+
+## Integration refresh plan — 2026-10-31
+
+Published PR head: `a42fd687279996f65b93dc5cbdf17db834e24ba2`.
+Current main: `fdb0c4446b8816ab625d07bffbfbdadd33067a4d`.
+
+Merge main without rewriting the nine published feature commits. Verify that
+package selection and formatter discovery still compose with the current CLI,
+then repeat the complete pinned Linux workspace, CLI build, corpus, differential,
+clippy and repository guard checks. Preserve all existing regression cases and
+the lockfile. Commit and push this plan to an isolated validation branch before
+running heavy jobs; update the existing PR branch only after the local battery
+and review pass. Earlier results above describe earlier trees, not this one.
+
+Integration results: pending.
+
+Contributor: Dima Mak / ub3dqy.
