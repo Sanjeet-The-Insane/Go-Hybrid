@@ -112,6 +112,22 @@ the lockfile. Commit and push this plan to an isolated validation branch before
 running heavy jobs; update the existing PR branch only after the local battery
 and review pass. Earlier results above describe earlier trees, not this one.
 
-Integration results: pending.
+Integration battery completed at 2026-10-31T21:10:22Z.
+Tested candidate: `7d2f8a7dce4cf87037fff3e0e51834e8b04e623d`.
+Linux/amd64, Rust 1.99.0, Go 1.26.9:
+
+| Check | Result |
+| --- | --- |
+| Compiler workspace | 2071 passed, 0 failed/ignored, 210 result groups |
+| Checker corpus | 130/130; ACCEPT 40 / ACCEPT-MANAGED 2 / REJECT 88 |
+| Differential loop | 42/42 build-and-run, 88/88 reject; FULL AGREEMENT |
+| CLI build / workspace all-targets clippy | pass; upstream warnings remain |
+| Guarantees / claims links / corpus census | pass |
+| Registration / conflict markers / changed-test format / diff check | pass |
+
+All 12 stages exit 0. SHA-256 checks confirm that the CLI, manifest, both
+integration files and lockfile retain the tested bytes after this evidence-only
+update. Earlier baseline and refresh evidence remains above. Hosted checks for
+the new PR head, maintainer review, landing and any award remain pending.
 
 Contributor: Dima Mak / ub3dqy.
