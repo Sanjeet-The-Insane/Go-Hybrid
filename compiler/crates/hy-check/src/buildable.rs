@@ -5221,6 +5221,53 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "min" | "max" => {
+                let mut first_arg: Option<(&Expr, OpKind)> = None;
+                for arg in args {
+                    let k = self.kind_of_expr(&arg.value);
+                    if matches!(k, OpKind::Unknown | OpKind::Void) {
+                        continue;
+                    }
+                    let is_ordered = matches!(k, OpKind::Int | OpKind::Float | OpKind::Str);
+                    if !is_ordered {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `{name}`: type has no order (HYB-E2005)",
+                                arg.value.render(),
+                                k.label()
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
+                    if let Some((prev_arg, prev_k)) = &first_arg {
+                        let is_compatible = if *prev_k == k {
+                            true
+                        } else if *prev_k == OpKind::Float && k == OpKind::Int {
+                            self.is_untyped_int_const(&arg.value)
+                        } else if *prev_k == OpKind::Int && k == OpKind::Float {
+                            self.is_untyped_int_const(prev_arg)
+                        } else {
+                            false
+                        };
+                        if !is_compatible {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "mismatched types `{}` and `{}` in `{name}` (HYB-E1002)",
+                                    prev_k.label(),
+                                    k.label()
+                                ),
+                                "all arguments to `min` and `max` must have matching ordered types",
+                            );
+                            return;
+                        }
+                    } else {
+                        first_arg = Some((&arg.value, k));
+                    }
+                }
+            }
             _ => {}
         }
     }
