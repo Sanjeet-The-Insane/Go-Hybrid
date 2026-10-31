@@ -258,22 +258,38 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
         // Numeric targets (Int, Float): can convert between Int and Float.
-        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
+        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // String target: can convert from Int (rune/byte code point) or Slice(Int) (byte/rune slice) or Str.
+        // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or non-int Slice.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
-        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
-        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
-        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice of identical element type.
+        // Direct array-to-slice conversion `[]T(arr)` is invalid in Go (must write `arr[:]`).
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct, Array.
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
+        (Slice(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+        // Array target: cannot convert from Str directly, or from non-container.
+        // In Go 1.20+, slice-to-array conversion [N]T(slice) requires matching element types.
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Array(a), Array(b)) | (Array(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Array, Chan, Struct.
+        // Converting between maps requires matching key and value types.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
+        (Map(k1, v1), Map(k2, v2)) => {
+            (k1 != k2 && **k1 != Unknown && **k2 != Unknown)
+                || (v1 != v2 && **v1 != Unknown && **v2 != Unknown)
+        }
+
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Array, Map, Struct.
+        // Converting between channels requires matching element types.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
+        (Chan(a), Chan(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Pointer targets and arguments: Go only converts between pointers.
         // A pointer cannot convert to or from any non-pointer type; the one
