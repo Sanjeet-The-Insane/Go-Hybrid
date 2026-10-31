@@ -76,4 +76,25 @@ this patch adds no formatting differences. The final documentation update does
 not change any tested production, test, manifest or lockfile bytes. Hosted CI,
 maintainer review and any award remain pending.
 
+## Refresh validation — 2026-10-31
+
+The same feature was rebased onto `2124e5ecf47588ae8c944660776bbfb3c20b7673`.
+Tested candidate: `fd0eed4cfb762b81431df538da0e1c3b23539562`.
+The CLI, manifest and both changed test files retain their published bytes;
+this refresh incorporates current upstream fixes and updates this evidence.
+Linux/amd64, Rust 1.99.0 and Go 1.26.9:
+
+| Check | Result |
+| --- | --- |
+| Compiler workspace | 1984 passed, 0 failed/ignored, 185 result groups |
+| Checker corpus | 129/129; ACCEPT 39 / ACCEPT-MANAGED 2 / REJECT 88 |
+| Differential loop | 41/41 build-and-run, 88/88 reject; FULL AGREEMENT |
+| CLI build / workspace all-targets clippy | pass; upstream warnings remain |
+| Guarantees / claims links / corpus census | pass |
+| Registration / conflict markers / changed-test format / diff check | pass |
+
+All 12 local validation stages exit 0. The final evidence-only commit keeps
+the tested source, tests, manifest and lockfile bytes. Hosted checks for the
+refreshed PR, maintainer review and any discretionary award remain pending.
+
 Contributor: Dima Mak / ub3dqy.

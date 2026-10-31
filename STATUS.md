@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor (2026-10-31): `hyb generate` ignores siblings excluded by Go build constraints; 6 pre-fix regression failures, patched CLI 27/27, workspace 1960/1960, corpus 127/127, differential 40/40 + 87/87 on pinned Linux toolchains. Existing source-format hunks/warnings remain; hosted CI, review and any award are pending. See the build-constraints entry in PLAN.md.
+- Contributor (2026-10-31): `hyb generate` ignores siblings excluded by Go build constraints; 6 pre-fix regression failures. Refreshed base `2124e5e`: pinned Linux workspace 1984/1984, corpus 129/129, differential 41/41 + 88/88, guarantees/links and other local guards pass; upstream warnings remain. Hosted CI, review and any award are pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
 - Contributor #2199: a store whose target is a type name (`n string = "str"`, `q.n int = 5`) is rejected as HYB-E1002 (Row 13 BUILDABLE) — the #778 check now also covers assignment targets; declarations and plain stores unchanged; 3 new tests in `type_name_in_value_position.rs` (16/16 green).
