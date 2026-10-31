@@ -1020,3 +1020,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), written replies posted.
 - Suite trajectory: 212 -> 213 (#2067's new suite). Final main 9f5626b, tree clean.
 - NEXT TICK QUEUE (wave continues, same flow): #2085 (w1933 Go AST emission gate) -> #2084 (w1928 go/types witness arbiter) -> #2081 (w2009 recover/defer) -> #2079 (w2049 asm leaf emitter) -> #2083 (w1929 CloseRight) -> #2082 (w1963 sendability proof) -> #2080 (w2015 GoBench census) -> #2077/#2078/#2075/#2076/#2074/#2073/#1856/#1893/#1855/#1914 (same series) -> #2295/#2292/#2291 (Yumihariii) -> #2503 (await rebase) -> #2300/#2494/#2321 -> #391 (await fix) -> #1811 (behind 13 now, await one-hunk + rebase).
+
+## Session 35 — 2026-11-01 morning II (tick 487193: 5 landed, 0 gate-fails)
+
+- Sandbox recycled (16th; toolchains re-restored, cold rebuild inside first verify). Baseline bfa5d8a (own session-34). Scan OK; approve 40/61. Wave continuing; #2417 (ket4min-susan) surfaced to Pareto top.
+- LANDED:
+  c9911ff Merge PR #2417 (ket4min-susan, fixes #2385) — W-2385 certified commutative merge capsules spike: .hy row8/row2 programs + E3401 rejection + python verifier + Go work module w/ 2 negative witnesses; criterion pytest 24/24 + go test OK + run_negatives.sh (both negatives rejected by go build). 213 suites.
+  efc84ef Merge PR #2085 (harmweber787-png, fixes #1933) — W-1933 structured Go AST emit gate; pytest 7/7. 213 suites.
+  2ad0605 Merge PR #2084 (harmweber787-png, fixes #1928) — W-1928 go/types witness arbiter; pytest 8/8. 213 suites.
+  748c9dc Merge PR #2081 (harmweber787-png, fixes #2009) — W-2009 defer/recover panic-safety checker; pytest 8/8. 213 suites.
+  d04c9e3 Merge PR #2079 (harmweber787-png, fixes #2049) — W-2049 zero-trampoline hy asm emitter; pytest 7/7. 213 suites.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD, written replies posted. Pure-additive spike flow is now smooth (~4 min/PR): verify -> temp worktree pytest -> merge -> push -> reply.
+- Suite trajectory: 213 (spikes don't add cargo suites). Final main d04c9e3, tree clean.
+- NEXT TICK QUEUE: wave tail #2083 (w1929 CloseRight) -> #2082 (w1963 sendability proof) -> #2080 (w2015 GoBench census) -> #2077 (w025 MIR) -> #1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 (same series) -> Yumihariii #2295/#2292/#2291 -> #2503 (await rebase) -> #2300/#2494/#2321 -> #391 (await fix) -> #1811 (await one-hunk, behind).
