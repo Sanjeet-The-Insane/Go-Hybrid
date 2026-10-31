@@ -110,12 +110,30 @@ impl<'a> Checker<'a> {
             Stmt::Task { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
-                    if let Some(w) = self.forwarded_tuple_arity(st, callee, true) {
-                        if self.static_result_count(st, &args[0].value).is_some_and(|(_, r)| r >= 2) {
+                    let forwarded = self.forwarded_tuple_arity(st, callee, true);
+                    // usize is Copy, so take the count rather than the tuple:
+                    // the tuple carries a String and would be moved below.
+                    let result_count = self
+                        .static_result_count(st, &args[0].value)
+                        .map(|(_, r)| r);
+                    if let (Some(w), Some(r)) = (forwarded, result_count) {
+                        if r >= 2 {
                             self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
                         }
                     }
-                    self.check_subexprs_single_value(st, &args[0].value);
+                    // A lone argument that is itself a multi-value call is
+                    // Go-legal when the callee takes exactly that many
+                    // parameters (`task w(pair())` with `w(a, b int)`). That
+                    // position is then not a single-value context, so the
+                    // walk below must not run on it: it would reject the
+                    // legal forwarding along with the illegal one. When the
+                    // arities do not match, check_multi_value_bind has
+                    // already said why and the walk still applies.
+                    let forwards_legally =
+                        forwarded.zip(result_count).is_some_and(|(w, r)| r >= 2 && r == w);
+                    if !forwards_legally {
+                        self.check_subexprs_single_value(st, &args[0].value);
+                    }
                 } else {
                     for a in args {
                         self.check_expr_single_value(st, &a.value, a.span);
@@ -217,12 +235,30 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
-                    if let Some(w) = self.forwarded_tuple_arity(st, callee, false) {
-                        if self.static_result_count(st, &args[0].value).is_some_and(|(_, r)| r >= 2) {
+                    let forwarded = self.forwarded_tuple_arity(st, callee, false);
+                    // usize is Copy, so take the count rather than the tuple:
+                    // the tuple carries a String and would be moved below.
+                    let result_count = self
+                        .static_result_count(st, &args[0].value)
+                        .map(|(_, r)| r);
+                    if let (Some(w), Some(r)) = (forwarded, result_count) {
+                        if r >= 2 {
                             self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
                         }
                     }
-                    self.check_subexprs_single_value(st, &args[0].value);
+                    // A lone argument that is itself a multi-value call is
+                    // Go-legal when the callee takes exactly that many
+                    // parameters (`task w(pair())` with `w(a, b int)`). That
+                    // position is then not a single-value context, so the
+                    // walk below must not run on it: it would reject the
+                    // legal forwarding along with the illegal one. When the
+                    // arities do not match, check_multi_value_bind has
+                    // already said why and the walk still applies.
+                    let forwards_legally =
+                        forwarded.zip(result_count).is_some_and(|(w, r)| r >= 2 && r == w);
+                    if !forwards_legally {
+                        self.check_subexprs_single_value(st, &args[0].value);
+                    }
                 } else {
                     for a in args {
                         self.check_expr_single_value(st, &a.value, a.span);
@@ -359,8 +395,13 @@ impl<'a> Checker<'a> {
                     return st.closure_defs.get(name.as_str()).map(|(p, _, _)| p.len());
                 }
                 let head = Self::base_named_type_str(name);
-                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
-                    return is_task.then_some(f.params.len());
+                // A named user function is already owned by buildable's
+                // check_multi_value_arg_arity, which reports a mismatch as
+                // E1002. Staying silent here keeps one diagnostic per
+                // problem — the same rule check_single_value_position
+                // follows when it defers to E2002.
+                if self.fns.get(name.as_str()).or_else(|| self.fns.get(head)).is_some() {
+                    return None;
                 }
                 (name == "some").then_some(1)
             }
