@@ -360,14 +360,32 @@ impl<'a> Checker<'a> {
                 self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false, is_let);
             }
         } else if l.names.len() == l.values.len() {
+            let pre_st = st.clone();
             for (name, val) in l.names.iter().zip(l.values.iter()) {
-                let inferred = self.shape_of_expr(st, val);
+                let inferred = self.shape_of_expr(&pre_st, val);
                 let shape = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
                     (_, s) => s,
                 };
-                let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                let ty = l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, val));
+                let rhs_slot_loan = match unwrap_parens(val) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                    }
+                    Expr::Move { operand, .. } => match unwrap_parens(operand) {
+                        Expr::Ident { name: src, .. } => {
+                            self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
             }
         }
     }

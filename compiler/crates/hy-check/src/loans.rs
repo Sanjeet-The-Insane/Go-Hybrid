@@ -1751,14 +1751,27 @@ impl<'a> Checker<'a> {
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
                 let moved_non_owned = self.moved_non_owned_origin_in_expr(&pre_st, value);
+                let rhs_slot_loan = match unwrap_parens(value) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                    }
+                    Expr::Move { operand, .. } => match unwrap_parens(operand) {
+                        Expr::Ident { name: src, .. } => {
+                            self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
-                    if let Some(origin) = moved_non_owned {
-                        if let Some(b) = st.env_lookup_mut(name) {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if let Some(origin) = moved_non_owned {
                             b.non_owned_origin = Some(origin);
                         }
+                        b.slot_loan |= rhs_slot_loan;
                     }
                     self.record_move_const_and_a3_loans(st, name, value, idx);
                     continue;
@@ -1831,6 +1844,11 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
                 if let Some(origin) = &moved_non_owned {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
@@ -5527,6 +5545,11 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
+        let prev_slot_loan = if same_scope_redecl {
+            self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
+        } else {
+            false
+        };
         let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
             st.may_share
                 .get(name)
@@ -5573,7 +5596,7 @@ impl<'a> Checker<'a> {
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: prev_moved,
                 non_owned_origin,
-                slot_loan: false,
+                slot_loan: prev_slot_loan,
             },
         );
     }
