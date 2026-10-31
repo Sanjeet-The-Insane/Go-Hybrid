@@ -16,7 +16,10 @@ impl Module {
         fs::create_dir_all(&root).unwrap();
         let m = Self(root);
         m.write("go.mod", "module example.com/constraint-demo\n\ngo 1.26\n");
-        m.write("app.go", "package demo\n\nfunc Existing() int { return Add(2, 3) }\n");
+        m.write(
+            "app.go",
+            "package demo\n\nfunc Existing() int { return Add(2, 3) }\n",
+        );
         m.write("calc.hy", "pub fn add(a int, b int) int { return a + b }\n");
         m.write(
             "app_test.go",
@@ -151,7 +154,10 @@ fn excluded_only_siblings_cannot_choose_the_package_or_rewrite_output() {
         }
         let before = fs::read(&path).ok();
         let modified = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-        for args in [vec!["generate", "calc.hy"], vec!["generate", "--check", "calc.hy"]] {
+        for args in [
+            vec!["generate", "calc.hy"],
+            vec!["generate", "--check", "calc.hy"],
+        ] {
             let out = m.hyb(&args, "-p=2");
             assert!(!out.status.success(), "excluded-only siblings must reject");
             let err = String::from_utf8_lossy(&out.stderr);
