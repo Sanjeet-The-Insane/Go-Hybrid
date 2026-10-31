@@ -420,10 +420,8 @@ enum GenOutcome {
 #[derive(Default)]
 struct GenTools {
     formatters: Option<Vec<std::path::PathBuf>>,
-    ignored_go_files: std::collections::BTreeMap<
-        std::path::PathBuf,
-        std::collections::BTreeSet<String>,
-    >,
+    ignored_go_files:
+        std::collections::BTreeMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
 }
 
 impl GenTools {
@@ -434,40 +432,47 @@ impl GenTools {
         let files = match self.ignored_go_files.entry(dir.to_path_buf()) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-            // Let Go interpret GOOS/GOARCH, build tags and legacy constraints.
-            // -find does not resolve imports. -e retains file metadata when a
-            // stale generated output disagrees with the hand-written package.
-            // auto also permits module-free projects; selection must not depend
-            // on an enclosing workspace or download project dependencies.
-            let out = Command::new(go_bin())
-                .args(["list", "-e", "-find", "-json", "."])
-                .current_dir(dir)
-                .env("GO111MODULE", "auto")
-                .env("GOWORK", "off")
-                .output()
-                .map_err(|e| format!("selecting Go files in {}: {}", dir.display(), e))?;
-            if !out.status.success() {
-                return Err(format!(
-                    "selecting Go files in {}: {}",
-                    dir.display(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ));
-            }
-            let package: serde_json::Value = serde_json::from_slice(&out.stdout)
-                .map_err(|e| format!("reading Go file selection in {}: {}", dir.display(), e))?;
-            if package.get("Dir").and_then(|v| v.as_str()).is_none() {
-                return Err(format!(
-                    "Go did not identify the package directory {}: {}",
-                    dir.display(), package
-                ));
-            }
-            let mut ignored = std::collections::BTreeSet::new();
-            if let Some(files) = package.get("IgnoredGoFiles") {
-                let files = files.as_array().ok_or("invalid Go ignored-file list")?;
-                for file in files {
-                    ignored.insert(file.as_str().ok_or("invalid Go ignored filename")?.to_string());
+                // Let Go interpret GOOS/GOARCH, build tags and legacy constraints.
+                // -find does not resolve imports. -e retains file metadata when a
+                // stale generated output disagrees with the hand-written package.
+                // auto also permits module-free projects; selection must not depend
+                // on an enclosing workspace or download project dependencies.
+                let out = Command::new(go_bin())
+                    .args(["list", "-e", "-find", "-json", "."])
+                    .current_dir(dir)
+                    .env("GO111MODULE", "auto")
+                    .env("GOWORK", "off")
+                    .output()
+                    .map_err(|e| format!("selecting Go files in {}: {}", dir.display(), e))?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "selecting Go files in {}: {}",
+                        dir.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ));
                 }
-            }
+                let package: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).map_err(|e| {
+                        format!("reading Go file selection in {}: {}", dir.display(), e)
+                    })?;
+                if package.get("Dir").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!(
+                        "Go did not identify the package directory {}: {}",
+                        dir.display(),
+                        package
+                    ));
+                }
+                let mut ignored = std::collections::BTreeSet::new();
+                if let Some(files) = package.get("IgnoredGoFiles") {
+                    let files = files.as_array().ok_or("invalid Go ignored-file list")?;
+                    for file in files {
+                        ignored.insert(
+                            file.as_str()
+                                .ok_or("invalid Go ignored filename")?
+                                .to_string(),
+                        );
+                    }
+                }
                 entry.insert(ignored)
             }
         };
