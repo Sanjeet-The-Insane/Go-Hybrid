@@ -1006,3 +1006,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All three landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (#2608 #2604 #2486 landings, #391 evidence, #2503 rebase ask).
 - Suite trajectory: 209 -> 212. Final main 39cf5bb, tree clean.
 - NEXT TICK QUEUE: #2503 (after rebase) -> #2300 -> #2494 -> #2321 (ocakciomursel-pixel line), #2417/#2481 (ket4min-susan spikes, 373/1308 lines), #1675 (enums 769 lines), #391 (await fix), #1811 (await one-hunk), #2467/#2432/#2292/#2291/#391-siblings (aging), fresh conflicts #2606/#2509/#2529 (rebase asks if still silent).
+
+## Session 34 — 2026-11-01 morning (tick 487193: 5 landed, 0 gate-fails)
+
+- Sandbox recycled (15th; toolchains re-restored, cold rebuild inside first verify). Baseline f75d775 (own session-33 worklog). Scan OK; approve 40/72. harmweber787-png wave surfaced: a dozen+ self-contained spike/verifier PRs (docs/spikes + spikes/<name>/ + pytest), all 0-behind, all pure-additive.
+- LANDED:
+  429383b Merge PR #2067 (tomaslizak, fixes #2066) — check_addr_of_loan fires on via_move (task w(move s), ch <- move s -> E3104); Send is_move synthesizes the Use; is_slot_loan_expr type-checks base-path root vs binding shape (detached copies stay accepted). 213 suites.
+  99a52e1 Merge PR #2095 (harmweber787-png, fixes #1931) — W-1931 demand-paged stack pool verifier; criterion pytest 4/4. 213 suites.
+  bc7a0a2 Merge PR #2094 (harmweber787-png, fixes #1935) — W-1935 three-stage place-graph verifier; pytest spikes/ 7/7. 213 suites.
+  9802047 Merge PR #2093 (harmweber787-png, fixes #1937) — W-1937 bounded generation arena; pytest spikes/ 8/8. 213 suites.
+  9f5626b Merge PR #2091 (harmweber787-png, fixes #1942) — W-1942 fuel capsule; pytest spikes/ 8/8. 213 suites.
+- Wave flow refined: verify_pr.sh runs in /tmp/verify-wt and REMOVES it at exit — PR-own pytest criterion needs its own temp worktree (git worktree add --detach /tmp/vw pr-N; pytest; remove). All wave PRs: verify ALL-GREEN + criterion PASS + merge + push + ls-remote==HEAD + written reply.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), written replies posted.
+- Suite trajectory: 212 -> 213 (#2067's new suite). Final main 9f5626b, tree clean.
+- NEXT TICK QUEUE (wave continues, same flow): #2085 (w1933 Go AST emission gate) -> #2084 (w1928 go/types witness arbiter) -> #2081 (w2009 recover/defer) -> #2079 (w2049 asm leaf emitter) -> #2083 (w1929 CloseRight) -> #2082 (w1963 sendability proof) -> #2080 (w2015 GoBench census) -> #2077/#2078/#2075/#2076/#2074/#2073/#1856/#1893/#1855/#1914 (same series) -> #2295/#2292/#2291 (Yumihariii) -> #2503 (await rebase) -> #2300/#2494/#2321 -> #391 (await fix) -> #1811 (behind 13 now, await one-hunk + rebase).
