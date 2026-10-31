@@ -5347,6 +5347,34 @@ impl<'a> Checker<'a> {
         if name == "_" {
             return;
         }
+        let same_scope_redecl = if let Some(top) = st.scopes.last() {
+            top.contains_key(name)
+        } else {
+            st.env.contains_key(name)
+        };
+        let prev_moved = if same_scope_redecl {
+            self.lookup_binding(st, name).and_then(|b| b.moved.clone())
+        } else {
+            None
+        };
+        let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
+            st.may_share
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    st.closure_defs.contains_key(*c)
+                        || st.closure_fnlits.contains_key(*c)
+                        || matches!(
+                            self.lookup_binding(st, c).map(|b| &b.shape),
+                            Some(TypeShape::Closure)
+                        )
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let shadows_outer = st
             .scopes
             .last()
@@ -5357,6 +5385,9 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
+        for cp in closure_peers {
+            st.share_edge(name, &cp);
+        }
         let non_owned_origin = if immutable {
             Some(format!("`const {}`", name))
         } else {
@@ -5370,7 +5401,7 @@ impl<'a> Checker<'a> {
                 immutable,
                 is_let,
                 managed_taint: managed, // O6.2: born inside `managed {}`
-                moved: None,
+                moved: prev_moved,
                 non_owned_origin,
                 slot_loan: false,
             },
@@ -5823,10 +5854,33 @@ impl<'a> Checker<'a> {
                         b.moved = None; // a fresh value re-owns the binding
                         b.non_owned_origin = info.non_owned;
                     }
+                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
+                        && !st.closure_fnlits.contains_key(name)
+                    {
+                        st.may_share
+                            .get(name)
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| {
+                                st.closure_defs.contains_key(*c)
+                                    || st.closure_fnlits.contains_key(*c)
+                                    || matches!(
+                                        self.lookup_binding(st, c).map(|b| &b.shape),
+                                        Some(TypeShape::Closure)
+                                    )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     // a rebind re-owns the binding: drop the old alias and
                     // may-share edges, then re-record from the new value (#27)
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    for cp in closure_peers {
+                        st.share_edge(name, &cp);
+                    }
                     if info.reads_self {
                         if !info.prior_shadows.is_empty() {
                             st.shadow_links
