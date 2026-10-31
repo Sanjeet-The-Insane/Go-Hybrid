@@ -953,3 +953,23 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All six: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written landing replies posted.
 - Suite trajectory: 188 -> 191. Corpus 129 -> 130 (ACCEPT 40). Final main ad859a2, tree clean.
 - NEXT TICK QUEUE: #1709 (option match arm guards/order), #2425 (autoland repro verdicts), #1811/#2290/#2390/#2566/#1780 (Pareto), hue batch #1766/#1767, #2467/#2432 (13-behind, aging), new arrivals #2513/#2530/#2486/#2503/#2494/#2571-siblings.
+
+## Session 31 — 2026-11-01 small hours (tick 487193: 10 landed, 1 gate-fail evidence)
+
+- Sandbox recycled (12th; toolchains re-restored, cold rebuild inside first verify). Baseline efe4aca (no parallel advancement).
+- Scan: approve 40/103. Pareto top-down; ryder777777 + RPMFAN batches plus autoland and T23.
+- LANDED:
+  3f94e9e Merge PR #1722 (ryder777777) — rangebind option-match simplification only on the simple shape (no guards, <=1 none, <=1 wildcard last); guarded shapes keep binders. 192 suites.
+  208c93b Merge PR #1703 (ryder777777) — hoist non-trivial callees (Index/Call/paren-unwrap) before ? arguments; go-run test pins fns[bump(c)](fail()?) order. 193 suites.
+  f60c525 Merge PR #1699 (ryder777777) — O5 fail-closed: opaque interproc callees get pairwise share edges + non-owned origin; depth>4 falls back to shape-filtered pairwise sharing. 194 suites.
+  17d45b6 Merge PR #1709 (ryder777777) — needs_ordered_arms sequential if !hyMatched chain for guarded/multi-fallback option matches; guard-read binders materialized pre-guard (expr_reads/body_reads). 195 suites.
+  8a094ea Merge PR #2132 (RPMFAN) — comparable walk: select arm headers (recv chan / send chan+value), assign target places (new collect_comparable_in_place), array lengths. 196 suites.
+  e2ed94c Merge PR #2147 (RPMFAN) — type_of_expr: Try/Move unwrap, foreign constructor table (time/serde_json/http/url) + fn_shapes ForeignTy on ident callees. 197 suites.
+  d1d99e1 Merge PR #2131 (RPMFAN) — type_of_place + place_member_name: MethodZero 'w.header[k]=v -> w.Header()[k]=v', nested user-struct foreign fields normalized. 198 suites.
+  222561a Merge PR #2425 (ket4min-susan, fixes #2424) — autoland: --pr flag, crash exits CHECKER-FAILED not STALE-PREMISE, word-boundary expected-code regex; criterion 23/23. 198 suites.
+  c50cb98 Merge PR #1701 (ryder777777) — T23 multi-value arity on task/prelude/fn-value calls with U7 lone-forward exception. 199 suites.
+  605adf5 Merge PR #2290 (Yumihariii, #682 U1) — method values carry declaration arity (OpKind::Fn(.., Some(params.len()))), closing the fail-open Unknown. 200 suites.
+- GATE FAIL (evidence reply, not landed): #1811 (hue, fixes #1803) — own suite 8/9: type_alias_named_real_is_a_conversion_target expects Accept for 'type real = float64; const c = real(1.0)' but the PR's const_init.rs returns false when type_aliases contains the name -> HYB-E6003. Implementation contradicts its own (Go-correct) test; fix is one hunk (alias -> conversion-target fallthrough), invited same-tick. Everything else green on the PR tree (gate CLEAN, tripwire not fired, differential FULL 42/42+88/88).
+- All ten landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 191 -> 200. Final main 605adf5, tree clean.
+- NEXT TICK QUEUE: #2390/#2566/#1780 (Pareto), #1811 (await one-hunk fix), hue batch #1766/#1767, #1715 (wildcard spike), #2467/#2432 (aging), new arrivals #2513/#2530/#2486/#2503/#2494.
