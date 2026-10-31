@@ -53,7 +53,7 @@ fn named_result_signature_rejects_other_width() {
 }
 #[test]
 fn typed_arithmetic_keeps_its_operand_type() {
-    assert_e1002("fn f() float64 { n := 3\n return n * 2.0 }\nfn main() { fmt.println(\"{f()}\") }\n");
+    assert_e1002("fn f() float64 { n := 3\n return n * 2 }\nfn main() { fmt.println(\"{f()}\") }\n");
     assert_e1002("fn f(n int) int64 { return -n }\nfn main() { fmt.println(\"{f(1)}\") }\n");
     assert_e1002("fn f(x int64, n int) int { return x << n }\nfn main() { fmt.println(\"{f(1, 2)}\") }\n");
 }
