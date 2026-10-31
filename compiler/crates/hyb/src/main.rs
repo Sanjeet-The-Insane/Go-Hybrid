@@ -431,7 +431,9 @@ impl GenTools {
         &mut self,
         dir: &std::path::Path,
     ) -> Result<&std::collections::BTreeSet<String>, String> {
-        if !self.ignored_go_files.contains_key(dir) {
+        let files = match self.ignored_go_files.entry(dir.to_path_buf()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
             // Let Go interpret GOOS/GOARCH, build tags and legacy constraints.
             // -find does not resolve imports. -e retains file metadata when a
             // stale generated output disagrees with the hand-written package.
@@ -466,9 +468,10 @@ impl GenTools {
                     ignored.insert(file.as_str().ok_or("invalid Go ignored filename")?.to_string());
                 }
             }
-            self.ignored_go_files.insert(dir.to_path_buf(), ignored);
-        }
-        Ok(self.ignored_go_files.get(dir).unwrap())
+                entry.insert(ignored)
+            }
+        };
+        Ok(files)
     }
 }
 
