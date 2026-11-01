@@ -5480,21 +5480,24 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
-                } else if name == "pop" {
+                } else if name == "pop" && !has_method {
                     self.check_slice_pop_operands(base, &bk, args, span);
                     // `pop` is also a built-in slice operation, so this branch
                     // is entered before the missing-member check below. A
-                    // struct or pointer only has `.pop()` if it declares the
-                    // method; without one Go refuses the call with
+                    // struct, pointer, or interface only has `.pop()` if it
+                    // declares the method; without one Go refuses the call with
                     // "<base>.pop undefined (type ... has no field or method pop)".
-                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                    if matches!(
+                        bk,
+                        OpKind::Struct(_) | OpKind::Pointer(_) | OpKind::Interface
+                    ) {
                         self.emit_e1002(
                             span,
                             format!(
                                 "`{}` has no field or method `pop` (HYB-E1002)",
                                 base.render()
                             ),
-                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                            "a struct, pointer, or interface supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
                         );
                     }
                 } else if !has_method {
@@ -5510,8 +5513,10 @@ impl<'a> Collector<'a> {
                     // invisible to the kind model rather than absent. A foreign
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
-                    // prelude call rather than a Go method.
-                    if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str())
+                    // prelude call rather than a Go method (only on slices).
+                    let is_lowered = matches!(bk, OpKind::Slice(_))
+                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                    if is_fully_resolved(&bk) && !is_lowered
                     {
                         self.emit_e1002(
                             span,
