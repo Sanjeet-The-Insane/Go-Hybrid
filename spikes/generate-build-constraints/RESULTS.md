@@ -131,3 +131,16 @@ update. Earlier baseline and refresh evidence remains above. Hosted checks for
 the new PR head, maintainer review, landing and any award remain pending.
 
 Contributor: Dima Mak / ub3dqy.
+
+## Integration refresh plan — 2026-11-01
+
+Published PR head: `2001bc88cce701ef0bff7ad3fa2a058032d54ddb`.
+Current main: `7e770eab08a09b6468ddfeb9bfa3d7040b3554d7`.
+
+Integrate the new upstream history without rewriting published commits.
+The CLI, manifest and both integration test files must retain their delivered
+bytes. Repeat the pinned Linux workspace, CLI build, corpus, differential, clippy
+and repository guard checks; do not weaken or remove existing regression cases.
+Commit and push this plan to an isolated validation branch before heavy jobs.
+Update the existing PR branch only after the local battery and review pass.
+Earlier results above describe earlier trees, not this candidate.
