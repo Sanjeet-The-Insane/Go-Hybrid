@@ -1080,3 +1080,26 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All eleven: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) with zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 219 -> 230. Final main f055eb0, tree clean.
 - NEXT TICK QUEUE: gttps tail #2664 (+666 inner subexprs) -> #2670 (+807 zero-divisor folding) -> #2610 (range bound hoisting + option match exhaustion, behind 1) -> #1694 (tools, behind 0) -> #2295/#2291 (Yumihariii) -> #2400 (build constraints) -> #2517 (await rebase) -> #2300/#2494/#2321 -> conflicts (#2651/#2498/#2653 ask-rebase if still silent) -> #1811 (await one-hunk) -> #2481 wave tail (#2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914).
+
+## Session 39 — 2026-11-01 early afternoon (tick 487193: 10 landed, 2 gate-fails, 1 rebase ask)
+
+- Sandbox recycled (20th; toolchains re-restored, cold rebuild inside first verify). Baseline 88fe62b (own session-38). Scan OK; approve 9/9. Dimank92 dropped a 12-PR checker wave overnight (all behind 0, score 9); gttps + Yumihariii tails processed.
+- LANDED (Pareto top-down):
+  38a230d Merge PR #2656 (Dimank92, fixes #2645) — array literals accept untyped int consts + any-typed elements (allow-side). 231 suites.
+  26d5dac Merge PR #2654 (Dimank92, fixes #2643) — direct pointer conversions with incompatible base types reject; pointer reply posted on competing #2644. 232 suites.
+  76f303d Merge PR #2659 (Dimank92, fixes #2616) — O8 closure capture uniqueness + field-store conflicts; O8 closure story complete. 233 suites.
+  68bc345 Merge PR #2689 (Dimank92, fixes #2688) — set[float64] methods + delete reject typed int vars. 234 suites.
+  a702ae4 Merge PR #2673 (Dimank92, fixes #2655) — copy() identical element types. 235 suites. (Board title claimed also #2686; body cites only #2655 — merge message follows the body, disclosed in reply.)
+  cc23b37 Merge PR #2695 (Dimank92, fixes #2693) — make() non-integer size args reject. 236 suites.
+  58d38f2 Merge PR #2599 (Dimank92, fixes #2534) — match literal patterns vs subject type; untyped patterns still convert. 237 suites.
+  c607324 Merge PR #2597 (Dimank92, fixes #2542) — min/max ordered types + single operand kind. 238 suites.
+  8afbab9 Merge PR #2596 (Dimank92, fixes #2546 + #2531) — string/container conversion element kinds. 239 suites.
+  253ff4d Merge PR #2610 (gttps, fixes #2609) — same-name range bound hoisting + option match exhaustion ordering (checker/emitter alignment). 240 suites.
+  56283fe Merge PR #2295 (Yumihariii, #1553) — user-struct field chains resolve recursively at emit (depth-1..4 + option-wrapped + foreign tails). 241 suites.
+- GATE FAILS (evidence replies, not landed):
+  #2593 (Dimank92, fixes #2540) — CARGO-Fail on merged tree: own test expects HYB-E2005 but #2695 (landed 10 min earlier, same author, same position) fires first with HYB-E1002. Not a soundness failure (rejection happens, differential FULL); it's a code-ownership collision between two of the author's own takes. Three resolution options offered (rebase+expect E1002 / make E2005 own the position / split non-overlap); same-tick re-verify invited.
+  #2581 (Dimank92, fixes #2577+#2650+#2691) — CARGO-FAIL on PR tree: pinned positive fc_closure_boundary_send_inside_managed_escapes (lib.rs:2386) now Rejects — new send-operand rule ignores the managed hatch (E8001 warning + hard E1002 error on same site) and resolves the element type wrong through the closure boundary. Fix direction given. DUP partner #2622 (jdjioe5-cpu) fails separately: duplicate is_untyped_int_const definition vs landed family infra — mechanical, rebase fixes it; evidence reply posted there too.
+- REBASE ASK (conflict, not landed): #2677 (Dimank92, fixes #2658) — kinds_conflict match arm restructured in both directions (landed #2673 added copy_element_kinds_conflict; PR adds append_element_kinds_conflict in the same arm). Asked for rebase keeping both callers; same-tick land on push.
+- All ten landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 230 -> 241. Final main 56283fe, tree clean.
+- NEXT TICK QUEUE: #2291 (Yumihariii len/cap) -> #2400 (ub3dqy build constraints, behind 0) -> #1694 (tools release script, behind 0) -> gttps #2664 (+666) -> #2670 (+807) -> #2593 (await author pick) -> #2581/#2622 (await fixes) -> #2677 (await rebase) -> #2517 (await rebase) -> #2300/#2494/#2321 -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
