@@ -76,6 +76,11 @@ impl Emitter {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
+                    if let TypeExpr::Pointer { to, .. } = exp {
+                        let body = self.struct_lit_body(to, fields)?;
+                        let s = format!("&{}{{{}}}", self.type_text(to), body);
+                        return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
@@ -236,11 +241,19 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
-                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
+                    // N5: `[N]T{}` and the trailing elements of a partial `[N]T{…}`
+                    // are zero values — allocate their maps (zeroinit.rs).
+                    if let (true, Some(init)) = (items.is_empty(), self.n5_zero_init(arr_ty)) {
+                        return Ok(init);
+                    }
                     let head = self.type_text(arr_ty);
                     let mut parts = Vec::new();
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
+                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -266,7 +279,7 @@ impl Emitter {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
-                    let kt = self.emit_expr(k, 0)?;
+                    let kt = self.emit_expr_exp(k, 0, Some(key))?;
                     // Elided struct values inherit the map's VALUE type
                     // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
                     let vt = self.emit_expr_exp(v, 0, Some(value))?;
@@ -396,14 +409,7 @@ impl Emitter {
                 // Block): emitted verbatim so `fn() int {…}` lowers to
                 // `func() int {…}`.
                 if !results.is_empty() {
-                    let rs = results
-                        .iter()
-                        .map(|r| match &r.name {
-                            Some(n) => format!("{} {}", n, self.type_text(&r.ty)),
-                            None => self.type_text(&r.ty),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let rs = self.result_list_text(results);
                     out.push_str(&format!("({}) ", rs));
                 }
                 out.push_str("{\n");
@@ -532,6 +538,39 @@ impl Emitter {
                 "empty `[]` literal — write `[]T{}` with the element type",
             ));
         };
+        // Parentheses and a sign on a numeric literal are transparent:
+        // `[-1, 2]` is `[]int`, `[(2.5), 1]` is `[]float64` — the same head
+        // hy-check's untyped-slice item check infers.
+        let mut first = first;
+        let mut negated = false;
+        loop {
+            match first {
+                Expr::Paren { inner, .. } => first = inner,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } => {
+                    negated = true;
+                    first = operand;
+                }
+                _ => break,
+            }
+        }
+        if negated
+            && !matches!(
+                first,
+                Expr::Lit {
+                    kind: LitKind::Int(_) | LitKind::Float(_),
+                    ..
+                }
+            )
+        {
+            return Err(EmitError::unsupported(format!(
+                "untyped slice literal of `-{}` — spell the element type",
+                first.render()
+            )));
+        }
         let elem = match first {
             Expr::Lit { kind, .. } => match kind {
                 LitKind::Int(_) => "int",
@@ -559,6 +598,58 @@ impl Emitter {
     // -----------------------------------------------------------------------
     // Calls — builtins, package specials, foreign methods
     // -----------------------------------------------------------------------
+
+    /// The user-declared struct type name an expression evaluates to, when
+    /// the whole chain resolves through declared fields: `o`, `(&o)`,
+    /// `o.sub`, `o.sub.deep`, parenthesized links included. None the moment
+    /// a link is not a user struct (foreign shape, slice, `set[T]`, …).
+    ///
+    /// This is the recursive form of the single-hop `var_struct[Ident].field`
+    /// lookup the emitters used to inline. `stats.mu.lock()` resolved one
+    /// hop only; `o.sub.mu.lock()` dropped the shape, emitted the hy name
+    /// verbatim, and died in `go build` with
+    /// `has no field or method lock, but does have method Lock` (#1553).
+    pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
+            Expr::AddrOf { operand, .. } => self.user_struct_name_of(operand),
+            Expr::Field { base, name, .. } => {
+                let sn = self.user_struct_name_of(base)?;
+                let fty = self
+                    .struct_fields
+                    .get(sn)?
+                    .iter()
+                    .find(|(f, _)| f == name)
+                    .map(|(_, t)| t.as_str())?;
+                self.resolve_to_struct_name(fty)
+            }
+            _ => None,
+        }
+    }
+
+    /// Map a type name to a declared struct, following `type alias = …`
+    /// links (#1553 review): a field declared `sub wrapper` where
+    /// `type wrapper = inner` still carries `inner`'s member shapes — the
+    /// old `contains_key(fty)` test only accepted the spelled name, so an
+    /// aliased hop dropped the chain exactly like a missing recursion did.
+    /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
+    /// bounded walk returns None.
+    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+        let mut cur = std::borrow::Cow::Borrowed(start);
+        for _ in 0..16 {
+            if let Some((k, _)) = self.struct_fields.get_key_value(cur.as_ref()) {
+                return Some(k.as_str());
+            }
+            match self.n5_aliases.get::<str>(cur.as_ref()) {
+                Some(ty) => match super::base_ty_name(ty) {
+                    Some(next) if next.as_str() != cur.as_ref() => cur = std::borrow::Cow::Owned(next),
+                    _ => return None,
+                },
+                None => return None,
+            }
+        }
+        None
+    }
 
     /// Descriptor type of an expression, when the shape table knows it
     /// (Batch E chain resolution):
@@ -594,26 +685,72 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                // Batch I: user-struct field typing — `stats.mu` resolves
-                // through var_struct + struct_fields when the field's
-                // declared type is shape-known (18: sync.mutex).
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base.as_ref()) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
+                // Batch I (recursive since #1553): user-struct field
+                // typing — `stats.mu` and `o.sub.mu` resolve through
+                // var_struct + struct_fields when the field's declared
+                // type is shape-known (18: sync.mutex).
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            if let Some((k, _)) =
+                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                            {
+                                return Some(k);
                             }
                         }
                     }
                 }
                 None
             }
-            // A zero-arg/method call's result type is the member's result.
-            Expr::Call { callee, .. } => self.type_of_expr(callee),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => self.type_of_expr(operand),
+            // A zero-arg/method call's result type is the member's result;
+            // package constructors and user functions returning shape-known
+            // foreign types resolve to their descriptor keys.
+            Expr::Call { callee, .. } => {
+                if let Some(t) = self.type_of_expr(callee) {
+                    return Some(t);
+                }
+                match Self::unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
+                                self.fn_shapes.get(fn_head)
+                            {
+                                return Some(t);
+                            }
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if self.is_unshadowed_pkg_root(pkg) {
+                                return match (pkg.as_str(), name.as_str()) {
+                                    (
+                                        "time",
+                                        "since"
+                                        | "until"
+                                        | "milliseconds"
+                                        | "seconds"
+                                        | "minutes"
+                                        | "hours"
+                                        | "parse_duration",
+                                    ) => Some("time.duration"),
+                                    ("time", "now" | "parse") => Some("time.time"),
+                                    ("serde_json", "parse" | "new_object" | "new_array") => {
+                                        Some("serde_json.value")
+                                    }
+                                    ("http", "new_serve_mux") => Some("http.serve_mux"),
+                                    ("url", "parse") => Some("url.url"),
+                                    _ => None,
+                                };
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -666,18 +803,12 @@ impl Emitter {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
             Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
-            Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return self.struct_fields.contains_key(fty.as_str());
-                            }
-                        }
-                    }
-                }
-                false
-            }
+            // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
+            // structs, not just `o.f`. The old single-hop read made a
+            // three-level `o.sub.thing.pop()` look like a builtin pop and
+            // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
+            // a user struct field.
+            Expr::Field { .. } => self.user_struct_name_of(e).is_some(),
             _ => false,
         }
     }
@@ -927,7 +1058,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() && first.value.as_array_lit().is_none() => {
+            } if items.is_empty() && first_val.as_array_lit().is_none() => {
                 format!("[]{}", self.type_text(t))
             }
             Expr::MapLit {
@@ -950,6 +1081,26 @@ impl Emitter {
         for a in &args[1..] {
             parts.push(self.emit_call_arg(a)?);
         }
+        // N5: `make([]T, n[, c])` elements are zero values too — allocate their
+        // maps through hy_n5_make (zeroinit.rs, N5_MAKE_PRELUDE). Go's `make`
+        // takes any integer type for the sizes; the helper takes `int`.
+        let elem = match first_val {
+            Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
+            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+                TypeExpr::Slice { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((elem, init)) = elem.and_then(|t| self.n5_zero_init(&t).map(|init| (t, init))) {
+            parts[0] = format!("func() {} {{ return {} }}", self.type_text(&elem), init);
+            for (a, s) in args[1..].iter().zip(&mut parts[1..]) {
+                if !matches!(a.value, Expr::Lit { kind: LitKind::Int(_), .. }) {
+                    *s = format!("int({})", s);
+                }
+            }
+            return Ok(format!("hy_n5_make({})", parts.join(", ")));
+        }
         Ok(format!("make({})", parts.join(", ")))
     }
 
@@ -968,7 +1119,13 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            } if items.is_empty() => {
+                if val.as_array_lit().is_some() {
+                    self.type_text(t)
+                } else {
+                    format!("[]{}", self.type_text(t))
+                }
+            }
             Expr::MapLit {
                 key,
                 value,

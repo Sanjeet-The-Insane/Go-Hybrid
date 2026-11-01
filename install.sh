@@ -27,6 +27,7 @@ case "$INSTALL_DIR" in
     /*) ;;
     *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
 esac
+case "$BIN_DIR" in /*) ;; *) BIN_DIR="$PWD/$BIN_DIR" ;; esac
 
 # --- platform ---
 OS="$(uname -s)"
@@ -65,6 +66,7 @@ fetch() {
 #   HEAD https://github.com/<repo>/releases/latest -> Location: .../tag/vX.Y.Z
 # Fallback: the API (rate-limited 60/hr unauthenticated — documented).
 if [ -n "$VERSION" ]; then
+    case "$VERSION" in *[!a-zA-Z0-9._+-]* | .* | -* | *..*) echo "install.sh: invalid HYB_VERSION '$VERSION'" >&2; exit 2 ;; esac
     TAG="$VERSION"
 else
     echo "==> resolving latest release"

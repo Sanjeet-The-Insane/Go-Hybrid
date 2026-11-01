@@ -86,17 +86,23 @@ class Gh:
                     raw = resp.read().decode()
                     return resp.status, (json.loads(raw) if raw.strip() else None)
             except HTTPError as e:
-                if e.code in (429, 502, 503, 504) and attempt < 3:
-                    time.sleep([2, 5, 10][attempt])
-                    last_err = e
-                    continue
-                if e.code == 404:
-                    return 404, None
                 body_txt = ""
                 try:
                     body_txt = e.read().decode()[:400]
                 except Exception:
                     pass
+                if e.code == 404:
+                    return 404, None
+                # GitHub secondary rate limits surface as 403 with a "rate
+                # limit" body, not 429 — retry those with a longer backoff
+                # (the window is typically 30-60s). Other 403s are permission
+                # errors: fail fast, retrying cannot help.
+                is_rate_403 = e.code == 403 and "rate limit" in body_txt.lower()
+                if (e.code in (429, 502, 503, 504) or is_rate_403) and attempt < 3:
+                    time.sleep([2, 5, 10][attempt] if e.code != 403
+                               else [5, 20, 45][attempt])
+                    last_err = e
+                    continue
                 raise RuntimeError("%s %s -> %s %s" % (method, path, e.code, body_txt))
             except RateGuard:
                 raise
@@ -206,6 +212,10 @@ def collect(cfg, gh, args):
             "age_days": age_days(pr["created_at"], now),
             "idle_days": age_days(pr["updated_at"], now),
             "draft": bool(pr.get("draft")),
+            # the PR object already carries its labels; recording them here is
+            # free (no extra API call) and lets cmd_labels diff instead of
+            # re-posting every label on every run.
+            "current_labels": [l["name"] for l in (pr.get("labels") or [])],
             "mergeable": full.get("mergeable"),
             "mergeable_state": full.get("mergeable_state"),
             "head_sha": pr["head"]["sha"][:12],
@@ -511,18 +521,32 @@ def cmd_labels(args):
     items = json.loads(Path(args.from_scan).read_text())["items"] if args.from_scan else None
     if items is None:
         items, _ = classify(cfg, collect(cfg, gh, args)[0])
+    # Only POST the delta. The scan already carries each PR's current labels, so
+    # re-posting an unchanged set is pure rate-limit burn: with ~590 open PRs and
+    # shepherd-board firing on every pull_request/issues event, an unconditional
+    # loop would cost tens of thousands of writes a day against a 1000/hour
+    # budget. Compute what is actually missing and touch only those.
+    added = skipped = 0
     for it in items:
         want = it["labels"]
         if not want:
             continue
+        have = set(it.get("current_labels") or [])
+        missing = [l for l in want if l not in have]
+        if not missing:
+            skipped += 1
+            continue
         if args.dry:
-            log("  #%d -> %s" % (it["number"], ",".join(want)))
+            log("  #%d -> %s" % (it["number"], ",".join(missing)))
+            added += 1
             continue
         try:
-            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": want})
+            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": missing})
+            added += 1
         except RuntimeError as e:
             log("  FAIL #%d: %s" % (it["number"], e))
-    log("labels applied (%d calls total, %s remaining)" % (gh.calls, gh.remaining))
+    log("labels applied: %d changed, %d already current (%d calls total, %s remaining)"
+        % (added, skipped, gh.calls, gh.remaining))
 
 
 # ---------------------------------------------------------------- board
