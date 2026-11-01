@@ -4319,12 +4319,12 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if ik == OpKind::Unknown || ik == expected || expected == OpKind::Interface {
                 continue;
             }
             if expected == OpKind::Float
                 && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
+                && self.is_untyped_int_const(item)
             {
                 continue;
             }
