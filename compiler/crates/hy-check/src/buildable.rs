@@ -792,6 +792,15 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #2770 — the canonical numeric spelling of a simple local target, for the
+    /// assignment/argument scalar comparison. Non-ident places fail open.
+    fn place_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_scalar(n),
+            _ => None,
+        }
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -923,6 +932,19 @@ impl<'a> Collector<'a> {
                 _ => self.typed_value_scalar(operand),
             },
             other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #2770: two TYPED values of different canonical numeric types (e.g.
+    /// `float32` vs `float64`, `int` vs `int64`) are distinct Go types and
+    /// cannot combine, compare, or assign directly. `typed_value_scalar` is
+    /// `None` for an untyped constant, so `f + 1.5` / `i + 1` stay legal, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_conflict(&self, a: &Expr, b: &Expr) -> bool {
+        match (self.typed_value_scalar(a), self.typed_value_scalar(b)) {
+            (Some(x), Some(y)) => x != y,
+            _ => false,
         }
     }
 
@@ -1347,7 +1369,12 @@ impl<'a> Collector<'a> {
                 let int_float_conflict = want == OpKind::Float
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
-                if kinds_conflict(&want, &vk) || int_float_conflict {
+                // #2770: `var h float64 = f` where `f` is a `float32`.
+                let scalar_mismatch = matches!(
+                    (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
+                    (Some(w), Some(v)) if w != v
+                );
+                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1366,7 +1393,12 @@ impl<'a> Collector<'a> {
                     let int_float_conflict = want == OpKind::Float
                         && vk == OpKind::Int
                         && !self.is_untyped_int_const(v);
-                    if kinds_conflict(&want, &vk) || int_float_conflict {
+                    // #2770: concrete numeric type differing under one `OpKind`.
+                    let scalar_mismatch = matches!(
+                        (self.scalar_of_ty(t), self.typed_value_scalar(v)),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -3521,7 +3553,13 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: both sides share `OpKind::Float`/`Int` but differ in the
+            // concrete type (`float32` vs `float64`, `int` vs `int64`).
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3564,7 +3602,12 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: concrete numeric type differing under one `OpKind`.
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4251,7 +4294,7 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4322,7 +4365,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4345,7 +4388,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4370,6 +4413,7 @@ impl<'a> Collector<'a> {
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || int_float_conflict
+                    || self.scalar_conflict(lhs, rhs)
                 {
                     self.emit_e1002(
                         span,
@@ -4466,7 +4510,12 @@ impl<'a> Collector<'a> {
                         && self.is_untyped_int_const(&values[0]);
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&tk, &vk);
-                    if !is_loan_shape && conflict {
+                    // #2770: `g = f` between a `float64` and a `float32` local.
+                    let scalar_mismatch = matches!(
+                        (self.place_scalar(target), self.typed_value_scalar(&values[0])),
+                        (Some(t), Some(v)) if t != v
+                    );
+                    if !is_loan_shape && (conflict || scalar_mismatch) {
                         self.emit_e1002(
                             span,
                             format!(
