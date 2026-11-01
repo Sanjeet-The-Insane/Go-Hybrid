@@ -144,3 +144,21 @@ and repository guard checks; do not weaken or remove existing regression cases.
 Commit and push this plan to an isolated validation branch before heavy jobs.
 Update the existing PR branch only after the local battery and review pass.
 Earlier results above describe earlier trees, not this candidate.
+
+Integration battery completed at 2026-11-01T02:40:21Z.
+Tested candidate: `87e2e5e9891c13a374365faef6d8b0ee524bf5cc`.
+Linux/amd64, Rust 1.99.0, Go 1.26.9:
+
+| Check | Result |
+| --- | --- |
+| Compiler workspace | 2097 passed, 0 failed/ignored, 218 result groups |
+| Checker corpus | 130/130; ACCEPT 40 / ACCEPT-MANAGED 2 / REJECT 88 |
+| Differential loop | 42/42 build-and-run, 88/88 reject; FULL AGREEMENT |
+| CLI build / workspace all-targets clippy | pass; upstream warnings remain |
+| Guarantees / claims links / corpus census | pass |
+| Registration / conflict markers / changed-test format / diff check | pass |
+
+All 12 local stages exit 0. SHA-256 checks preserve the tested CLI, manifest,
+both integration files and lockfile bytes across this final evidence-only
+commit. Hosted CI for the refreshed head, maintainer review, landing and any
+award remain pending.
