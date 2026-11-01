@@ -987,7 +987,10 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                let int_float_conflict = want == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(&l.values[0]);
+                if kinds_conflict(&want, &vk) || int_float_conflict {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1003,7 +1006,10 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    let int_float_conflict = want == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(v);
+                    if kinds_conflict(&want, &vk) || int_float_conflict {
                         self.emit_e1002(
                             l.span,
                             format!(
