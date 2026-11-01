@@ -90,6 +90,10 @@ pub(crate) enum OpKind {
     /// declaration is out of reach). The count is what closes the
     /// closure/method-value arity bypass (#577 C9).
     Fn(Vec<OpKind>, Option<usize>),
+    /// #2823 — `option[T]` carries its payload kind. `Unknown` here would be
+    /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
+    /// `var s string = op.unwrap()` all passed and failed `go build`.
+    Option(Box<OpKind>),
     Void,
 }
 
@@ -114,6 +118,7 @@ impl OpKind {
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
+            OpKind::Option(e) => format!("option[{}]", e.label()),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -167,6 +172,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        // #2823: an option only satisfies an option (with a compatible
+        // payload); every other pairing falls through to the mismatch arm, so
+        // `op + 1` and `takes_int(op)` are refused exactly as Go refuses them.
+        (Option(a), Option(b)) => kinds_conflict(a, b),
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
         (Fn(..), Fn(..)) => false,
@@ -401,6 +410,10 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
+        // #2823: an option's members stay fail-open — member-name checking on
+        // `option[T]` is a separate concern (#1671), and this pass only needs
+        // the payload kind for operand/argument/initializer checks.
+        OpKind::Option(_) => false,
     }
 }
 
@@ -2582,7 +2595,7 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1))),
             TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2678,7 +2691,9 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => {
+                OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
             TypeExpr::Fn { results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2975,6 +2990,14 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    // #2823: `some(v)` produces `option[kind(v)]`.
+                    "some" if !self.ck.fns.contains_key("some") => {
+                        let payload = args
+                            .first()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![OpKind::Option(Box::new(payload))]);
+                    }
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -2994,6 +3017,20 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                // #2823: the option payload methods carry a real result kind —
+                // `unwrap()` / `or(d)` yield the payload, `is_some()` /
+                // `is_none()` yield `bool`. Member lookup on an option stays
+                // fail-open otherwise (that is #1671's territory).
+                if let OpKind::Option(elem) = &bk {
+                    match name.as_str() {
+                        "unwrap" if args.is_empty() => return Some(vec![(**elem).clone()]),
+                        "or" if args.len() == 1 => return Some(vec![(**elem).clone()]),
+                        "is_some" | "is_none" if args.is_empty() => {
+                            return Some(vec![OpKind::Bool])
+                        }
+                        _ => {}
+                    }
+                }
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
