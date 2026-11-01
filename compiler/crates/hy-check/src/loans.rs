@@ -228,6 +228,43 @@ impl<'a> Checker<'a> {
                     self.check_a3_method_call(st, cr, idx, &root, &recv, &method);
                     return;
                 };
+                // #2200: a handle whose binding is vendored in `runtime/go/`
+                // has a FINITE method surface, and Go rejects every other name
+                // at `go build` (`doc.Get undefined (type jsonbinding.Value has
+                // no field or method Get)`). Fail closed here rather than let
+                // an unbuildable program pass `hyb check`. Types outside the
+                // modelled surface keep the old fail-open behaviour.
+                if let Some(surface) = foreign::foreign_method_surface(&tname) {
+                    if !surface.contains(&method.as_str()) {
+                        let list = surface.join(", ");
+                        self.diags.push(
+                            Diagnostic::error(
+                                "HYB-E1002",
+                                self.path.clone(),
+                                cr.span,
+                                format!(
+                                    "`{}` has no method `{}` — Go refuses `{} undefined (type {} has no field or method {})` (HYB-E1002)",
+                                    tname,
+                                    method,
+                                    cr.callee.render(),
+                                    tname,
+                                    method
+                                ),
+                            )
+                            .with_notes(vec![
+                                format!("`{}` is a foreign handle; its methods are `{}`", tname, list),
+                                format!(
+                                    "package-level names are not methods — write `{}.{}` instead of `{}.{}()`",
+                                    tname.split('.').next().unwrap_or(&tname),
+                                    method,
+                                    root,
+                                    method
+                                ),
+                            ]),
+                        );
+                        return;
+                    }
+                }
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())
@@ -682,11 +719,12 @@ impl<'a> Checker<'a> {
         let verb = format!("mutation via `{}`", cr.callee.render());
         let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
         if let Some(sname) = recv_sname {
+            let sbase = Self::base_named_type_str(&sname);
             let found_decl = self.file.decls.iter().find_map(|d| match d {
                 hy_syntax::Decl::Fn(f) if f.name == method => {
                     let r = f.receiver.as_ref()?;
                     let b = Self::base_named_type(&r.ty)?;
-                    (b == sname).then_some(f)
+                    (b == sbase).then_some(f)
                 }
                 _ => None,
             });
@@ -851,7 +889,7 @@ impl<'a> Checker<'a> {
             match stmt {
                 Stmt::Assign { targets, values, .. } => {
                     for t in targets {
-                        if matches!(t.kind, PlaceKind::Index { .. }) && alias_stack.last().unwrap().contains(t.root()) {
+                        if (matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some()) && alias_stack.last().unwrap().contains(t.root()) {
                             return true;
                         }
                     }
@@ -928,6 +966,7 @@ impl<'a> Checker<'a> {
     /// captures it (a body declaring its own `param` shadows it — those
     /// references are the closure's fresh binding, not the caller's map).
     fn expr_fnlit_mutates_param(&self, e: &Expr, param: &str, depth: usize) -> bool {
+        if walk::addr_of_index_base_path(e).is_some_and(|p| path_root(&p) == param) { return true; }
         match e {
             Expr::FnLit {
                 params,
@@ -1038,7 +1077,7 @@ impl<'a> Checker<'a> {
                     .collect();
                 let typed_results: Vec<(String, Option<hy_syntax::TypeExpr>)> = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 st.closure_fnlits.insert(
                     name.to_string(),
@@ -1258,7 +1297,7 @@ impl<'a> Checker<'a> {
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) {
+                    if matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some() {
                         let raw = t.root().to_string();
                         if let Some(r) = resolve(&raw, current_aliases, current_shadows) {
                             out.insert(r);
@@ -1275,6 +1314,7 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
             for v in fnlit_values {
+                if let Some(r) = walk::addr_of_index_base_path(v).and_then(|p| resolve(path_root(&p), &pre_aliases, &pre_shadows)) { out.insert(r); }
                 if let Expr::FnLit {
                     params: fp,
                     results: fr,
@@ -1680,7 +1720,14 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (
                         inferred,
-                        l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, value)),
+                        l.ty.clone()
+                            .or_else(|| self.ty_of_expr(&pre_st, value))
+                            // Composite operands the type cache does not
+                            // project (`sub := append(chs, ch)`): bind the
+                            // projected type so later `<-sub[0]` receives
+                            // resolve their direction (the "known remaining
+                            // sibling" in recv_composite_channel_operands.rs).
+                            .or_else(|| self.composite_type_expr(&pre_st, value)),
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
@@ -2688,8 +2735,47 @@ impl<'a> Checker<'a> {
     /// binding freezes the other (O5.2, `HYB-E3003`) and cannot launder a
     /// non-owned parameter/capture/const across a concurrency boundary
     /// (O5.1 / O5.4, `HYB-E3004`; T22, `HYB-E3006`).
+    fn is_opaque_interproc_call(&self, st: &FnState, callee: &Expr) -> bool {
+        match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
+            Expr::Field { base, name, .. } => {
+                !matches!(crate::model::unwrap_parens(base), Expr::Ident { name: p, .. } if self.lookup_binding(st, p).is_none() && self.known_package(p))
+                    && (!matches!(name.as_str(), "insert" | "contains" | "remove" | "len" | "pop")
+                        || self.method_decls.iter().any(|((_, m), _)| m == name))
+            }
+            Expr::FnLit { .. } => false,
+            _ => true,
+        }
+    }
+
     pub(crate) fn record_callee_param_stores(&self, st: &mut FnState, cr: &CallRef) {
         let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
+            if self.is_opaque_interproc_call(st, cr.callee) {
+                let mut roots = Vec::new();
+                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
+                    collect_ref_roots(base, &mut roots);
+                    collect_addr_of_roots(base, &mut roots);
+                }
+                for a in cr.args {
+                    collect_ref_roots(&a.value, &mut roots);
+                    collect_addr_of_roots(&a.value, &mut roots);
+                }
+                let origin = cr.args.iter().find_map(|a| self.moved_non_owned_origin_in_expr(st, &a.value));
+                for d in &roots {
+                    if self.binding_may_share(st, d) {
+                        for s in &roots {
+                            if d != s && self.binding_may_share(st, s) {
+                                st.share_edge(d, s);
+                            }
+                        }
+                        if let Some(ref o) = origin {
+                            if let Some(db) = st.env_lookup_mut(d) {
+                                db.non_owned_origin.get_or_insert_with(|| o.clone());
+                            }
+                        }
+                    }
+                }
+            }
             return;
         };
         if slots.len() < 2 {
@@ -3001,8 +3087,12 @@ impl<'a> Checker<'a> {
         body: &Block,
         depth: usize,
     ) -> Vec<(usize, usize)> {
-        if depth > 4 || slots.len() < 2 {
-            return Vec::new();
+        if slots.len() < 2 { return Vec::new(); }
+        if depth > 4 {
+            return (0..slots.len()).flat_map(|i| (0..slots.len()).filter(move |&j| i != j).map(move |j| (i, j)))
+                .filter(|&(i, j)| (self.shape_may_share(&slots[i].1) || matches!(slots[i].1, TypeShape::Unknown | TypeShape::Pointer(_)))
+                    && (self.shape_may_share(&slots[j].1) || matches!(slots[j].1, TypeShape::Unknown)))
+                .collect();
         }
         let mut cst = FnState::default();
         let mut aliases: std::collections::HashMap<String, HashSet<usize>> =
@@ -3539,10 +3629,14 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if depth >= 4 {
-            return;
-        }
-        let Some((sub_slots, sub_body)) = self.resolve_callee_slots_and_body(cst, cr) else {
+        let Some((sub_slots, sub_body)) = (depth < 4).then(|| self.resolve_callee_slots_and_body(cst, cr)).flatten() else {
+            if depth >= 4 || self.is_opaque_interproc_call(cst, cr.callee) {
+                let mut s_all: Vec<usize> = cr.args.iter().flat_map(|a| self.expr_slot_origins(cst, &a.value, aliases)).collect();
+                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
+                    s_all.extend(self.expr_slot_origins(cst, base, aliases));
+                }
+                for &d in &s_all { for &s in &s_all { if d != s { out.insert((d, s)); } } }
+            }
             return;
         };
         if sub_slots.len() < 2 {
@@ -4179,7 +4273,7 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((params, results, body))
             }
@@ -4238,7 +4332,7 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((params, results, body))
             }
@@ -4254,7 +4348,7 @@ impl<'a> Checker<'a> {
                     .collect();
                 let r = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| (r.name.clone().unwrap_or_default(), Some(r.ty.clone())))
                     .collect();
                 Some((p, r, body))
             }
@@ -4266,6 +4360,14 @@ impl<'a> Checker<'a> {
     /// shape `shape_may_share` is true) that a call inside `value` may return
     /// (directly, via local aliases/projections/literals, or via named results
     /// on bare `return`).
+    ///
+    /// Fails closed (issue #2320): a chain of calls deeper than
+    /// `CALLEE_CONST_RETURN_WALK_LIMIT` and a callee whose body this file
+    /// cannot see (a function value in a binding, a computed callee) report
+    /// every may-share file-level `const` instead of assuming a fresh result.
+    /// The report only covers results that may share (or whose shape did not
+    /// resolve): a result the checker types as a plain value cannot alias a
+    /// `const`, so it keeps the pre-#2320 verdict.
     pub(crate) fn collect_callee_const_return_roots(
         &self,
         st: &FnState,
@@ -4273,7 +4375,114 @@ impl<'a> Checker<'a> {
         out: &mut Vec<String>,
         depth: usize,
     ) {
-        if depth > 4 {
+        let mut walked: HashMap<String, Option<Vec<String>>> = HashMap::new();
+        self.walk_callee_const_return_roots(st, value, out, depth, &mut walked);
+    }
+
+    /// Depth bound for the interprocedural walk in
+    /// `collect_callee_const_return_roots`. Chains deeper than this are not
+    /// traced: past the bound the walk reports every may-share file-level
+    /// `const` instead of assuming the call result is fresh (SPEC O4.9). The
+    /// visited-set below keeps one walk linear in the number of callee bodies,
+    /// so the bound is a safety net against pathological inputs, not a cost
+    /// limit (#2320).
+    const CALLEE_CONST_RETURN_WALK_LIMIT: usize = 32;
+
+    /// Is a fail-closed report warranted for `value`? SPEC O4.9 is about the
+    /// share, not about the name: only a result that may share mutable GC
+    /// storage (or whose shape did not resolve) can hand a file-level `const`
+    /// back, so an expression the checker types as a plain value — a deep
+    /// chain of `int`-returning wrappers, say — keeps its report off. The
+    /// shape is only trusted where it did resolve; an unresolved shape stays
+    /// fail-closed through the `Unknown` arm.
+    fn fail_closed_for(&self, st: &FnState, value: &Expr) -> bool {
+        let shape = self.shape_of_expr(st, unwrap_parens(value));
+        self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown)
+    }
+
+    /// Fail closed (SPEC O4.9, GUARANTEES row 4): every file-level `const`
+    /// whose shape may share is a possible value of an expression whose callee
+    /// this file cannot trace. Callers intersect these names with their own
+    /// roots, so reporting a superset is always safe.
+    fn push_may_share_const_roots(&self, out: &mut Vec<String>) {
+        for (name, cb) in &self.consts {
+            if self.shape_may_share(&cb.shape) && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+    }
+
+    /// A callee whose body this file cannot see, but which may still return a
+    /// file-level `const` of this file (SPEC O4.9 — fail closed):
+    ///
+    /// * a function value held in a local binding or file-level `const`
+    ///   (`cb := leaf; m := cb()`), or a closure binding `st.closure_fnlits`
+    ///   does not know;
+    /// * a computed callee (`fns[i]()`, `pick()()`);
+    /// * a field call on a value of a struct this file declares, when the name
+    ///   is not a declared method: a func-typed struct field (`holder.cb()`) or
+    ///   a method we could not attribute to one receiver (ambiguous shape).
+    ///
+    /// Deliberately NOT included: a call into another package (`pkg.Fn()`) and
+    /// an unresolvable bare name (`make`, `append`, an undefined function).
+    /// `const`s are file-level, so another file's function cannot hand one of
+    /// ours back, and the builtins return fresh values.
+    fn callee_returns_unseen_shared_const(&self, st: &FnState, callee: &Expr) -> bool {
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
+            Expr::Field {
+                base,
+                name: method,
+                ..
+            } => {
+                if matches!(unwrap_parens(base), Expr::Ident { name: pkg, .. }
+                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg))
+                {
+                    return false;
+                }
+                let head = Self::base_named_type_str(method);
+                if self.method_decls.keys().any(|(_, m)| m == head) {
+                    return true;
+                }
+                // A field of a struct declared in this file may hold a function
+                // value (`holder.cb()`), whose target we cannot see.
+                match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => {
+                        self.structs.contains_key(Self::base_named_type_str(&s))
+                    }
+                    TypeShape::Pointer(inner) => {
+                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(Self::base_named_type_str(s)))
+                    }
+                    _ => false,
+                }
+            }
+            Expr::Index { .. } | Expr::Call { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// The walk behind `collect_callee_const_return_roots`.
+    ///
+    /// `walked` keys a callee by the address of its body block (`None` while
+    /// that body is on the walk, `Some(roots)` once its contribution is known).
+    /// Within one query a callee contributes the same roots no matter which
+    /// call site asked for it, so a repeat visit replays the first one — that is
+    /// what keeps a diamond-shaped call graph linear instead of exponential in
+    /// the depth bound. A body that is already on the walk (recursion) is
+    /// reported fail-closed: its own `return`s are being handled by the outer
+    /// walk, and re-entering it would loop.
+    fn walk_callee_const_return_roots(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        out: &mut Vec<String>,
+        depth: usize,
+        walked: &mut HashMap<String, Option<Vec<String>>>,
+    ) {
+        if depth > Self::CALLEE_CONST_RETURN_WALK_LIMIT {
+            if self.fail_closed_for(st, value) {
+                self.push_may_share_const_roots(out);
+            }
             return;
         }
         match unwrap_parens(value) {
@@ -4288,37 +4497,73 @@ impl<'a> Checker<'a> {
                 operand,
                 ..
             } => {
-                self.collect_callee_const_return_roots(st, operand, out, depth);
+                self.walk_callee_const_return_roots(st, operand, out, depth, walked);
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
-                    self.collect_callee_const_return_roots(st, &f.value, out, depth);
+                    self.walk_callee_const_return_roots(st, &f.value, out, depth, walked);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.collect_callee_const_return_roots(st, k, out, depth);
-                    self.collect_callee_const_return_roots(st, v, out, depth);
+                    self.walk_callee_const_return_roots(st, k, out, depth, walked);
+                    self.walk_callee_const_return_roots(st, v, out, depth, walked);
                 }
             }
             Expr::SliceLit { items, .. } => {
                 for it in items {
-                    self.collect_callee_const_return_roots(st, it, out, depth);
+                    self.walk_callee_const_return_roots(st, it, out, depth, walked);
                 }
             }
             Expr::Call { callee, args, .. } => {
                 for a in args {
-                    self.collect_callee_const_return_roots(st, &a.value, out, depth);
+                    self.walk_callee_const_return_roots(st, &a.value, out, depth, walked);
                 }
-                self.collect_callee_const_return_roots(st, callee, out, depth);
+                self.walk_callee_const_return_roots(st, callee, out, depth, walked);
                 let Some((typed_params, typed_results, body)) =
                     self.resolve_call_expr_decl_or_fnlit(st, callee)
                 else {
+                    // The callee's declaration is not visible here; if the
+                    // value it is called through may still be one of our
+                    // file-level `const`s, report them all instead of treating
+                    // the call result as fresh (SPEC O4.9, issue #2320).
+                    if self.callee_returns_unseen_shared_const(st, callee)
+                        && self.fail_closed_for(st, value)
+                    {
+                        self.push_may_share_const_roots(out);
+                    }
                     return;
                 };
+                let key = format!("{:p}", body as *const Block);
+                match walked.get(&key) {
+                    Some(Some(roots)) => {
+                        for r in roots {
+                            if !out.contains(r) {
+                                out.push(r.clone());
+                            }
+                        }
+                        return;
+                    }
+                    Some(None) => {
+                        // A body already on the walk: its own returns are
+                        // handled by the outer walk, and re-entering it would
+                        // loop. Report fail-closed where a share is possible.
+                        if self.fail_closed_for(st, value) {
+                            self.push_may_share_const_roots(out);
+                        }
+                        return;
+                    }
+                    None => {}
+                }
+                walked.insert(key.clone(), None);
+                let mark = out.len();
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
-                shadowed.extend(typed_results.iter().map(|(n, _)| n.clone()));
+                shadowed.extend(
+                    typed_results
+                        .iter()
+                        .filter_map(|(n, _)| if !n.is_empty() { Some(n.clone()) } else { None }),
+                );
                 let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
                 for (cname, cb) in &self.consts {
                     if self.shape_may_share(&cb.shape) && !shadowed.contains(cname) {
@@ -4343,11 +4588,12 @@ impl<'a> Checker<'a> {
                 let expr_const_origins =
                     |e: &Expr,
                      aliases: &HashMap<String, HashSet<String>>,
-                     shadowed: &HashSet<String>|
+                     shadowed: &HashSet<String>,
+                     walked: &mut HashMap<String, Option<Vec<String>>>|
                      -> HashSet<String> {
                         let mut roots = Vec::new();
                         collect_ref_roots(e, &mut roots);
-                        self.collect_callee_const_return_roots(st, e, &mut roots, depth + 1);
+                        self.walk_callee_const_return_roots(st, e, &mut roots, depth + 1, walked);
                         let mut set = HashSet::new();
                         for r in roots {
                             if let Some(cs) = aliases.get(&r) {
@@ -4372,7 +4618,8 @@ impl<'a> Checker<'a> {
                                     shadowed.insert(n.clone());
                                 }
                             } else if l.values.len() == 1 && l.names.len() > 1 {
-                                let cs = expr_const_origins(&l.values[0], &aliases, &shadowed);
+                                let cs =
+                                    expr_const_origins(&l.values[0], &aliases, &shadowed, walked);
                                 for n in &l.names {
                                     if cs.is_empty() {
                                         aliases.remove(n);
@@ -4384,7 +4631,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for (n, v) in l.names.iter().zip(l.values.iter()) {
-                                    let cs = expr_const_origins(v, &aliases, &shadowed);
+                                    let cs = expr_const_origins(v, &aliases, &shadowed, walked);
                                     if cs.is_empty() {
                                         aliases.remove(n);
                                         shadowed.insert(n.clone());
@@ -4399,10 +4646,11 @@ impl<'a> Checker<'a> {
                             targets, values, ..
                         } => {
                             if targets.len() == values.len() {
-                                let rhs_cs: Vec<HashSet<String>> = values
-                                    .iter()
-                                    .map(|v| expr_const_origins(v, &aliases, &shadowed))
-                                    .collect();
+                                let mut rhs_cs: Vec<HashSet<String>> =
+                                    Vec::with_capacity(values.len());
+                                for v in values {
+                                    rhs_cs.push(expr_const_origins(v, &aliases, &shadowed, walked));
+                                }
                                 for (t, cs) in targets.iter().zip(rhs_cs) {
                                     match &t.kind {
                                         PlaceKind::Ident(n) => {
@@ -4427,7 +4675,8 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             } else if values.len() == 1 && targets.len() > 1 {
-                                let cs = expr_const_origins(&values[0], &aliases, &shadowed);
+                                let cs =
+                                    expr_const_origins(&values[0], &aliases, &shadowed, walked);
                                 for t in targets {
                                     if let PlaceKind::Ident(n) = &t.kind {
                                         if cs.is_empty() {
@@ -4444,6 +4693,9 @@ impl<'a> Checker<'a> {
                         Stmt::Return { values, .. } => {
                             if values.is_empty() {
                                 for (nr, _) in &typed_results {
+                                    if nr.is_empty() {
+                                        continue;
+                                    }
                                     if let Some(cs) = aliases.get(nr) {
                                         for c in cs {
                                             if !out.contains(c) {
@@ -4454,7 +4706,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for v in values {
-                                    for c in expr_const_origins(v, &aliases, &shadowed) {
+                                    for c in expr_const_origins(v, &aliases, &shadowed, walked) {
                                         if !out.contains(&c) {
                                             out.push(c);
                                         }
@@ -4465,6 +4717,8 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
+                // The roots this callee contributed, for the replay path above.
+                walked.insert(key, Some(out[mark..].to_vec()));
             }
             _ => {}
         }
@@ -4562,7 +4816,7 @@ impl<'a> Checker<'a> {
         let Some((typed_params, typed_results, body)) =
             self.resolve_call_expr_decl_or_fnlit(st, callee)
         else {
-            return Vec::new();
+            return if self.is_opaque_interproc_call(st, callee) { vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] } else { Vec::new() };
         };
         let mut cst = st.clone();
         cst.scope_push();
@@ -4583,7 +4837,7 @@ impl<'a> Checker<'a> {
             }
         }
         for (nr, rty) in &typed_results {
-            if nr == "_" {
+            if nr == "_" || nr.is_empty() {
                 continue;
             }
             let shape = rty
@@ -4864,7 +5118,13 @@ impl<'a> Checker<'a> {
                         }
                         typed_results
                             .iter()
-                            .map(|(nr, _)| origins.get(nr).cloned().unwrap_or_default())
+                            .map(|(nr, _)| {
+                                if nr.is_empty() || nr == "_" {
+                                    HashSet::new()
+                                } else {
+                                    origins.get(nr).cloned().unwrap_or_default()
+                                }
+                            })
                             .collect()
                     } else {
                         if values.len() < 2 {
@@ -5090,6 +5350,34 @@ impl<'a> Checker<'a> {
         if name == "_" {
             return;
         }
+        let same_scope_redecl = if let Some(top) = st.scopes.last() {
+            top.contains_key(name)
+        } else {
+            st.env.contains_key(name)
+        };
+        let prev_moved = if same_scope_redecl {
+            self.lookup_binding(st, name).and_then(|b| b.moved.clone())
+        } else {
+            None
+        };
+        let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
+            st.may_share
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    st.closure_defs.contains_key(*c)
+                        || st.closure_fnlits.contains_key(*c)
+                        || matches!(
+                            self.lookup_binding(st, c).map(|b| &b.shape),
+                            Some(TypeShape::Closure)
+                        )
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let shadows_outer = st
             .scopes
             .last()
@@ -5100,6 +5388,9 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
+        for cp in closure_peers {
+            st.share_edge(name, &cp);
+        }
         let non_owned_origin = if immutable {
             Some(format!("`const {}`", name))
         } else {
@@ -5113,7 +5404,7 @@ impl<'a> Checker<'a> {
                 immutable,
                 is_let,
                 managed_taint: managed, // O6.2: born inside `managed {}`
-                moved: None,
+                moved: prev_moved,
                 non_owned_origin,
                 slot_loan: false,
             },
@@ -5566,10 +5857,33 @@ impl<'a> Checker<'a> {
                         b.moved = None; // a fresh value re-owns the binding
                         b.non_owned_origin = info.non_owned;
                     }
+                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
+                        && !st.closure_fnlits.contains_key(name)
+                    {
+                        st.may_share
+                            .get(name)
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| {
+                                st.closure_defs.contains_key(*c)
+                                    || st.closure_fnlits.contains_key(*c)
+                                    || matches!(
+                                        self.lookup_binding(st, c).map(|b| &b.shape),
+                                        Some(TypeShape::Closure)
+                                    )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     // a rebind re-owns the binding: drop the old alias and
                     // may-share edges, then re-record from the new value (#27)
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    for cp in closure_peers {
+                        st.share_edge(name, &cp);
+                    }
                     if info.reads_self {
                         if !info.prior_shadows.is_empty() {
                             st.shadow_links
@@ -5790,7 +6104,21 @@ impl<'a> Checker<'a> {
                 if let Some(idx) = origin.find("`const ") {
                     let rest = &origin[idx + 7..];
                     if let Some(end) = rest.find('`') {
-                        return Some(rest[..end].to_string());
+                        let const_name = &rest[..end];
+                        // A copy of a scalar (or otherwise immutable-by-value) const is a
+                        // value copy, not a write-through alias: `const k = 3; x = k; x = 1`
+                        // must stay writable. Only consts that can share backing storage
+                        // (#123: map/slice/pointer/handle/struct-or-array containing them)
+                        // make a write through the copy a write to the const.
+                        if let Some(cb) = self.lookup_binding(st, const_name) {
+                            if matches!(
+                                cb.shape,
+                                TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic
+                            ) {
+                                return None;
+                            }
+                        }
+                        return Some(const_name.to_string());
                     }
                 }
             }
@@ -6210,6 +6538,21 @@ impl<'a> Checker<'a> {
             walk::own_fnlits(stmt, &mut fnlits);
             for flit in fnlits {
                 let mut merged = cst.clone();
+                let sp = flit.span();
+                let pos = (sp.start.line as usize, sp.start.col as usize);
+                if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
+                    for (k, v) in s_env {
+                        merged.env.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    for (k, v) in s_aliases {
+                        merged.aliases.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    for (k, peers) in s_share {
+                        for p in peers {
+                            merged.share_edge(k, p);
+                        }
+                    }
+                }
                 // Also preserve any top-level alias/share edges from the completed
                 // enclosing state `st` for bindings that are not shadowed in an
                 // inner scope of `merged` (covers post-closure rebinds to a const).
@@ -6493,9 +6836,10 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             if let Some(rname) = recv_base {
+                let rbase = Self::base_named_type_str(&rname).to_string();
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rname, method_name.clone()))
+                    .get(&(rbase, method_name.clone()))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -6619,7 +6963,8 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(decl) = recv_base.and_then(|rb| {
-                            self.method_decls.get(&(rb, method_name.clone())).copied()
+                            let rbase = Self::base_named_type_str(&rb).to_string();
+                            self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
                             match decl.params.get(i) {
                                 Some(p) => {
@@ -7086,6 +7431,7 @@ impl<'a> Checker<'a> {
         aliases: &HashSet<String>,
         depth: usize,
     ) -> bool {
+        if walk::addr_of_index_base_path(e).is_some_and(|p| aliases.contains(path_root(&p))) { return true; }
         match e {
             Expr::FnLit {
                 params,
