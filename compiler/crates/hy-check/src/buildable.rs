@@ -4773,6 +4773,26 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2789: whether an array-typed operand is NOT addressable in Go:
+    /// a composite literal, a call or conversion result, a map index
+    /// expression, or an element/field of such a value. Variables, slice
+    /// elements and anything reached through a pointer are addressable.
+    fn array_operand_unaddressable(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::SliceLit { .. } | Expr::Call { .. } => true,
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Map(_, _) => true,
+                OpKind::Array(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Struct(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
     /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
@@ -4799,6 +4819,22 @@ impl<'a> Collector<'a> {
                     bk.label()
                 ),
                 "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
+        // #2789: Go spec, Slice expressions — "If the sliced operand is an
+        // array, it must be addressable." `[3]int{..}[0:2]`, `arr()[1:]` and
+        // `m["a"][:2]` (map of arrays) passed `hyb check` and failed `go
+        // build` (`cannot slice unaddressable value`). Slices, strings and
+        // pointers to arrays are unaffected.
+        if matches!(bk, OpKind::Array(_)) && self.array_operand_unaddressable(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice unaddressable array value `{}` — Go refuses `cannot slice unaddressable value` (HYB-E1002)",
+                    base.render()
+                ),
+                "only an addressable array can be sliced: bind the array to a variable first (`a := ...; a[lo:hi]`)",
             );
             return;
         }
