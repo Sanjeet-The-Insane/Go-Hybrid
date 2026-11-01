@@ -465,6 +465,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared concrete type names (#2738).
+    type_name_scopes: Vec<HashMap<String, String>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -534,6 +536,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -601,6 +604,7 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
@@ -609,9 +613,54 @@ impl<'a> Collector<'a> {
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+    }
+
+    fn bind_type_name(&mut self, name: &str, type_name: String) {
+        if name != "_" {
+            if let Some(top) = self.type_name_scopes.last_mut() {
+                top.insert(name.to_string(), type_name);
+            }
+        }
+    }
+
+    fn lookup_type_name(&self, name: &str) -> Option<String> {
+        for layer in self.type_name_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("[]") {
+                        return Some(elem.to_string());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::Slice { base, .. } => self.slice_element_type_name(base),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1157,6 +1206,7 @@ impl<'a> Collector<'a> {
             let ps = self.scalar_of_ty(&p.ty);
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1165,6 +1215,7 @@ impl<'a> Collector<'a> {
                 self.bind_kind(rname, rk);
                 let rs = self.scalar_of_ty(&r.ty);
                 self.set_scalar(rname, rs);
+                self.bind_type_name(rname, r.ty.render());
             }
         }
         for r in &f.results {
@@ -1331,6 +1382,18 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        if let Some(t) = &l.ty {
+            let tname = t.render();
+            for name in &l.names {
+                self.bind_type_name(name, tname.clone());
+            }
+        } else if l.values.len() == l.names.len() {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                if let Some(elem) = self.slice_element_type_name(val) {
+                    self.bind_type_name(name, format!("[]{}", elem));
+                }
+            }
+        }
         for (((name, kind), scalar), set_elem) in
             l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
         {
@@ -2071,6 +2134,7 @@ impl<'a> Collector<'a> {
                     let ps = self.scalar_of_ty(&p.ty);
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -2079,6 +2143,7 @@ impl<'a> Collector<'a> {
                         self.bind_kind(rname, rk);
                         let rs = self.scalar_of_ty(&r.ty);
                         self.set_scalar(rname, rs);
+                        self.bind_type_name(rname, r.ty.render());
                     }
                 }
                 for r in results {
@@ -3703,11 +3768,88 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // `append(a, b...)` — a variadic spread passes the whole slice (or string
+            // into `[]byte`). Go requires the spread operand's element type to match
+            // the destination slice element type (issue #2738).
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                match got {
+                    OpKind::Unknown => {}
+                    OpKind::Slice(extra_elem) => {
+                        let dst_elem_ty = self.slice_element_type_name(&first.value);
+                        let src_elem_ty = self.slice_element_type_name(&extra.value);
+                        let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => {
+                                crate::const_overflow::canonical_int_type_name(d)
+                                    != crate::const_overflow::canonical_int_type_name(s)
+                            }
+                            _ => false,
+                        };
+                        let kind_mismatch = elem != *extra_elem
+                            && !matches!(elem, OpKind::Unknown)
+                            && !matches!(*extra_elem, OpKind::Unknown);
+                        if kinds_conflict(&elem, &extra_elem) || kind_mismatch || ty_mismatch {
+                            let (d_label, s_label) = match (dst_elem_ty, src_elem_ty) {
+                                (Some(d), Some(s)) => (format!("[]{}", d), format!("[]{}", s)),
+                                _ => (
+                                    self.kind_of_expr(&first.value).label().to_string(),
+                                    format!("[]{}", extra_elem.label()),
+                                ),
+                            };
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (type `{}`) as `{}` value in argument to append (HYB-E1002)",
+                                    extra.value.render(),
+                                    s_label,
+                                    d_label
+                                ),
+                                "elements of the spread slice must match the destination slice element type",
+                            );
+                        }
+                    }
+                    OpKind::Str => {
+                        let dst_elem_ty = self.slice_element_type_name(&first.value);
+                        let is_byte_slice = matches!(elem, OpKind::Int)
+                            && dst_elem_ty.as_deref().map_or(false, |t| {
+                                matches!(crate::const_overflow::canonical_int_type_name(t), "uint8")
+                            });
+                        let cannot_be_byte = !matches!(elem, OpKind::Int | OpKind::Unknown)
+                            || (matches!(elem, OpKind::Int)
+                                && dst_elem_ty.as_deref().map_or(false, |t| {
+                                    !matches!(
+                                        crate::const_overflow::canonical_int_type_name(t),
+                                        "uint8"
+                                    )
+                                }));
+                        if cannot_be_byte && !is_byte_slice {
+                            let d_label = dst_elem_ty
+                                .map(|d| format!("[]{}", d))
+                                .unwrap_or_else(|| self.kind_of_expr(&first.value).label().to_string());
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (type `string`) as `{}` value in argument to append (HYB-E1002)",
+                                    extra.value.render(),
+                                    d_label
+                                ),
+                                "string elements can only be appended to a byte slice (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in argument to append (HYB-E1002)",
+                                extra.value.render(),
+                                got.label(),
+                                self.kind_of_expr(&first.value).label()
+                            ),
+                            "a spread argument to `append` must be a slice (or string for `[]byte`)",
+                        );
+                    }
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
