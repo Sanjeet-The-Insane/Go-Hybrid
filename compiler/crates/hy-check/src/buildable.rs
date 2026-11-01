@@ -210,6 +210,20 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
     })
 }
 
+/// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
+/// named types no — so only genuinely sized arrays are compared.
+fn is_sized_array_spelling(s: &str) -> bool {
+    let t = s.trim();
+    if !t.starts_with('[') {
+        return false;
+    }
+    let Some(close) = t.find(']') else {
+        return false;
+    };
+    let head = &t[1..close];
+    !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -801,6 +815,31 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2771 — the declared Go spelling of a value whose type carries detail
+    /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
+    /// Only identifiers bound with an explicit type name are known; everything
+    /// else (literals, conversions, calls) fails open.
+    fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            _ => None,
+        }
+    }
+
+    /// #2771 — the declared Go spelling of a simple local assignment target.
+    fn place_type_name(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_type_name(n),
+            _ => None,
+        }
+    }
+
+    /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
+    /// types and unparsed lengths fail open so aliases never false-reject.
+    fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
+        matches!((a, b), (Some(x), Some(y))
+            if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -1374,7 +1413,15 @@ impl<'a> Collector<'a> {
                     (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
                     (Some(w), Some(v)) if w != v
                 );
-                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                // #2771: `var c [4]int = a` where `a` is a `[3]int`.
+                if kinds_conflict(&want, &vk)
+                    || int_float_conflict
+                    || scalar_mismatch
+                    || self.sized_array_names_differ(
+                        Some(t.render().as_str()),
+                        self.typed_value_type_name(&l.values[0]).as_deref(),
+                    )
+                {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1398,7 +1445,15 @@ impl<'a> Collector<'a> {
                         (self.scalar_of_ty(t), self.typed_value_scalar(v)),
                         (Some(w), Some(g)) if w != g
                     );
-                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                    // #2771: sized-array length must match the declared type.
+                    if kinds_conflict(&want, &vk)
+                        || int_float_conflict
+                        || scalar_mismatch
+                        || self.sized_array_names_differ(
+                            Some(t.render().as_str()),
+                            self.typed_value_type_name(v).as_deref(),
+                        )
+                    {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -3644,7 +3699,14 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3692,7 +3754,14 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            if kinds_conflict(&want, &got)
+                || int_to_float_conflict
+                || scalar_mismatch
+                || self.sized_array_names_differ(
+                    Some(p.ty.render().as_str()),
+                    self.typed_value_type_name(&a.value).as_deref(),
+                )
+            {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4379,7 +4448,14 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                    if equality_kinds_conflict(&lk, &rk)
+                        || int_float_conflict
+                        || self.scalar_conflict(lhs, rhs)
+                        || self.sized_array_names_differ(
+                            self.typed_value_type_name(lhs).as_deref(),
+                            self.typed_value_type_name(rhs).as_deref(),
+                        )
+                    {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4600,7 +4676,15 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
-                    if !is_loan_shape && (conflict || scalar_mismatch) {
+                    // #2771: `b = a` between a `[4]int` and a `[3]int`.
+                    if !is_loan_shape
+                        && (conflict
+                            || scalar_mismatch
+                            || self.sized_array_names_differ(
+                                self.place_type_name(target).as_deref(),
+                                self.typed_value_type_name(&values[0]).as_deref(),
+                            ))
+                    {
                         self.emit_e1002(
                             span,
                             format!(
