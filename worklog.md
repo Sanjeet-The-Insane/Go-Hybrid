@@ -1061,3 +1061,22 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All seven: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (+ #2640 pointer reply).
 - Suite trajectory: 217 -> 219 (#2503's set_element_soundness + #2647's map_float_key_soundness; spikes add pytest criteria only). Final main ca3fbef, tree clean.
 - NEXT TICK QUEUE: #2400 (ub3dqy build constraints package inference, behind 0, score 8) -> #2401 (E4 ?-needs-error-result, behind 8) -> #2295/#2291 (Yumihariii, behind 8) -> #1694 (tools, behind 0) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #2517 (await rebase post-#2478) -> #2300/#2494/#2321 -> #2509/#2606/#2529/#2651/#2498 (conflicts/rebase asks if still silent) -> #391 (await fix) -> #1811 (await one-hunk).
+
+## Session 38 — 2026-11-01 noon II (tick 487193: 11 landed, 0 gate-fails)
+
+- Sandbox recycled (19th; toolchains re-restored, cold rebuild inside first verify). Baseline ee39498 (own session-37; no parallel advancement). Scan OK; approve 25/25. Fresh wave: Dimank92 family continuation + gttps 7-PR burst + #391 rebased + ket4min-susan O8 closer.
+- LANDED (Pareto top-down):
+  98bece8 Merge PR #391 (ocakciomursel-pixel, fixes #390) — const pointer-receiver/borrow immutability (T22/O5.1/O5.4 on const value structs) + serde_json handle ownership/generation hardening (hyrt lib.rs +177, ABA fixtures). **Session-33 gate fail RESOLVED by author's rebase: pinned positive 05-json-transform.hy accepts again.** 14.8d old, 6 upstream re-syncs — oldest open PR lands. 220 suites. Note disclosed in reply: runtime/go has no Go module root (pre-existing layout) so json_test.go not runnable standalone; hyrt covered by cargo + differential accept-side.
+  d8ab15a Merge PR #2678 (Dimank92, fixes #2674) — float var declarations reject typed int vars. 221 suites.
+  c02b625 Merge PR #2584 (Dimank92, fixes #2567) — assignment to float targets + map[float64] indexing; infra hunks byte-identical to #2602 family, trial merge auto-resolved, merge carries tests only. 222 suites.
+  e88f57d Merge PR #2595 (Dimank92, fixes #2536) — delete() untyped int const keys on float maps ACCEPT (allow-side complement of #2647). 223 suites.
+  fd990e4 Merge PR #2667 (gttps, fixes #2665) — local const non-constant type ascriptions + zero-field struct/enum conversion shadowing. 224 suites.
+  b54bcd5 Merge PR #2625 (ket4min-susan, fixes #2624) — O8 slot-loan moves rejected in closures/alias copies/loop back-edges (addr_loan.rs +225 loan-aware move analysis). O8 story now complete end-to-end. 225 suites.
+  8cbfc58 Merge PR #2606 (Dimank92, fixes #2500) — single-value context in composite literals (comma-ok/multi-return reject in element slots). 226 suites.
+  ae06885 Merge PR #2668 (gttps, fixes #2666) — resolve fail-opens: bare package names as values, value-position type params, cyclic file consts (HYB-E1001, name-kind restructure). 227 suites.
+  48e4c97 Merge PR #2672 (gttps, fixes #2671) — hy-emit constconv wide shift folding without i128 wrap (explicit width+sign accounting). 228 suites.
+  be1d090 Merge PR #2566 (gttps, fixes #2565) — const_int_value_at fixed-width conversion wrapping + f32/f64 array lengths/receivers reject. 229 suites.
+  f055eb0 Merge PR #2562 (gttps, fixes #966) — shadow_links preserved in bind_match_arm + multi-value process_local (966 one of oldest soundness issues). 230 suites.
+- All eleven: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) with zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 219 -> 230. Final main f055eb0, tree clean.
+- NEXT TICK QUEUE: gttps tail #2664 (+666 inner subexprs) -> #2670 (+807 zero-divisor folding) -> #2610 (range bound hoisting + option match exhaustion, behind 1) -> #1694 (tools, behind 0) -> #2295/#2291 (Yumihariii) -> #2400 (build constraints) -> #2517 (await rebase) -> #2300/#2494/#2321 -> conflicts (#2651/#2498/#2653 ask-rebase if still silent) -> #1811 (await one-hunk) -> #2481 wave tail (#2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914).
