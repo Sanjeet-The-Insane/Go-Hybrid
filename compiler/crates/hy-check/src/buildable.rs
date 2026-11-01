@@ -1967,6 +1967,13 @@ impl<'a> Collector<'a> {
                     unwrap_parens(callee),
                     Expr::Ident { name, .. } if name == "new" || name == "make"
                 );
+                if type_first_arg {
+                    if let Some(first_arg) = args.first() {
+                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
+                            self.check_named_type_instantiation(name, *span);
+                        }
+                    }
+                }
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
                         continue;
@@ -2025,8 +2032,10 @@ impl<'a> Collector<'a> {
                 key,
                 value,
                 entries,
+                span,
                 ..
             } => {
+                self.check_map_key_comparable(key, *span);
                 self.ty(key);
                 self.ty(value);
                 self.check_value_position_type_name(key);
@@ -2128,7 +2137,8 @@ impl<'a> Collector<'a> {
                 }
                 self.ty(elem);
             }
-            TypeExpr::Map { key, value, .. } => {
+            TypeExpr::Map { key, value, span } => {
+                self.check_map_key_comparable(key, *span);
                 self.ty(key);
                 self.ty(value);
             }
@@ -2255,7 +2265,7 @@ impl<'a> Collector<'a> {
         if trimmed.starts_with("map[") {
             return Some("map");
         }
-        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") {
+        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") || trimmed == "fn" || trimmed == "func" {
             return Some("function");
         }
         if trimmed.starts_with("set[") || trimmed == "set" {
@@ -2291,6 +2301,26 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn check_map_key_comparable(&mut self, key: &TypeExpr, span: Span) {
+        let noun = match key {
+            TypeExpr::Slice { .. } => Some("slice"),
+            TypeExpr::Map { .. } => Some("map"),
+            TypeExpr::Fn { .. } => Some("function"),
+            _ => self.incomparable_type_noun(&key.render()),
+        };
+        if let Some(noun) = noun {
+            let key_ty_str = key.render();
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid map key type `{}`: {} is not comparable (HYB-E1002)",
+                    key_ty_str, noun
+                ),
+                "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
+            );
+        }
+    }
+
     fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
         let name = name.trim();
         if let Some(rest) = name
@@ -2315,6 +2345,17 @@ impl<'a> Collector<'a> {
         if let Some(after_map) = name.strip_prefix("map") {
             if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
                 if !v.trim().is_empty() {
+                    let k_trimmed = k.trim();
+                    if let Some(noun) = self.incomparable_type_noun(k_trimmed) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid map key type `{}`: {} is not comparable (HYB-E1002)",
+                                k_trimmed, noun
+                            ),
+                            "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
+                        );
+                    }
                     self.check_named_type_instantiation(k, span);
                     self.check_named_type_instantiation(v, span);
                     return;
