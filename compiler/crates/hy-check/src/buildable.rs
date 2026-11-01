@@ -3954,19 +3954,25 @@ impl<'a> Collector<'a> {
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
             {
-                self.emit_e1002(
-                    index.span(),
-                    format!(
-                        "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
-                        index.render(),
-                        ik.label(),
-                        key_kind.label(),
-                        bk.label()
-                    ),
-                    "map index expression must match the map's key type",
-                );
+                let is_untyped_int_to_float = **key_kind == OpKind::Float
+                    && *ik == OpKind::Int
+                    && self.is_untyped_int_const(index);
+                let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(key_kind, ik);
+                if conflict {
+                    self.emit_e1002(
+                        index.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                            index.render(),
+                            ik.label(),
+                            key_kind.label(),
+                            bk.label()
+                        ),
+                        "map index expression must match the map's key type",
+                    );
+                }
             }
             return;
         }
@@ -5048,9 +5054,13 @@ impl<'a> Collector<'a> {
                     }
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
+                        let is_untyped_int_to_float = **k_expected == OpKind::Float
+                            && kk == OpKind::Int
+                            && self.is_untyped_int_const(key_arg);
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
+                            && !is_untyped_int_to_float
                         {
                             self.emit_e2005(
                                 span,
