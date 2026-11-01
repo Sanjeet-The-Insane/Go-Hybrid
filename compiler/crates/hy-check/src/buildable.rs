@@ -416,6 +416,12 @@ struct Collector<'a> {
     roots: HashSet<String>,
     diags: Vec<Diagnostic>,
     path: String,
+    /// Composite element slots (items of a typed slice/array literal, keys
+    /// and values of a map literal, and items of an elided slice literal in
+    /// such a slot). hy-emit gives an untyped `[...]` there the EXPECTED
+    /// element type, so only untyped literals OUTSIDE these slots take their
+    /// type from their first item (`infer_slice_head`).
+    elided_slots: HashSet<*const Expr>,
 }
 
 /// Entry point: `check_file` calls this once per file (after the per-fn
@@ -440,6 +446,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
+            elided_slots: HashSet::new(),
         };
         for d in &file.decls {
             if let Decl::Const(cd) = d {
@@ -1595,6 +1602,12 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                     self.check_value_position_type_name(t);
                 }
+                let in_slot = self.elided_slots.contains(&(e as *const Expr));
+                if elem.is_some() || in_slot {
+                    for i in items {
+                        self.elided_slots.insert(unwrap_parens(i) as *const Expr);
+                    }
+                }
                 for i in items {
                     self.expr(i);
                 }
@@ -1602,6 +1615,8 @@ impl<'a> Collector<'a> {
                     self.check_array_lit_items(inner_elem, items);
                 } else if let Some(t) = elem {
                     self.check_slice_lit_items(t, items);
+                } else if !in_slot {
+                    self.check_untyped_slice_lit_items(items);
                 }
             }
             Expr::MapLit {
@@ -1614,6 +1629,10 @@ impl<'a> Collector<'a> {
                 self.ty(value);
                 self.check_value_position_type_name(key);
                 self.check_value_position_type_name(value);
+                for (k, v) in entries {
+                    self.elided_slots.insert(unwrap_parens(k) as *const Expr);
+                    self.elided_slots.insert(unwrap_parens(v) as *const Expr);
+                }
                 for (k, v) in entries {
                     self.expr(k);
                     self.expr(v);
@@ -4367,6 +4386,79 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `[h, a, b]` with no element type lowers to `[]H{h, a, b}`, where `H`
+    /// is what hy-emit infers from the first item (`infer_slice_head`): `int`,
+    /// `float64`, `string`, `bool`, or `rune` for a basic literal (a sign or
+    /// parentheses are transparent), the struct type for a typed struct
+    /// literal. Every later item must be assignable to `H`, exactly as in
+    /// the spelled-out `[]H{...}` — before this check `[1, "a"]`,
+    /// `[1, 2.5]`, `[1, x]` with `x float64`, and `["a", nil]` passed
+    /// `hyb check` and failed `go build` (`cannot use … in array or slice
+    /// literal`). A `nil` first item has no type at all and is refused by
+    /// the emitter (`nil in an untyped slice literal`), so it is rejected
+    /// here too.
+    fn check_untyped_slice_lit_items(&mut self, items: &[Expr]) {
+        let Some((first, rest)) = items.split_first() else {
+            return;
+        };
+        if matches!(
+            unwrap_parens(first),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        ) {
+            // `[nil, …]`: no element type at all — hy-emit refuses it
+            // (`nil in an untyped slice literal`).
+            self.emit_e1002(
+                first.span(),
+                "an untyped slice literal cannot start with `nil` — it has no element type to infer (HYB-E1002)".to_string(),
+                "spell the element type: `[]*T{nil}`, `[]error{nil}`, …",
+            );
+            return;
+        }
+        let Some(head) = untyped_slice_head_ty(first) else {
+            return;
+        };
+        let head_text = head.render();
+        let mut checked = Vec::new();
+        for item in rest {
+            match unwrap_parens(item) {
+                Expr::Lit {
+                    kind: LitKind::Nil,
+                    ..
+                } => {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in the untyped slice literal (its element type is inferred from the first item `{}`) (HYB-E1002)",
+                            head_text,
+                            first.render()
+                        ),
+                        "an untyped `[...]` takes its element type from its first item; spell a nilable element type instead (`[]*T{...}`, `[]error{...}`)",
+                    );
+                }
+                // Go accepts an integral float constant in an int slot
+                // (`[]int{1, 2.0}`).
+                Expr::Lit {
+                    kind: LitKind::Float(f),
+                    ..
+                } if head_text == "int"
+                    && f.replace('_', "").parse::<f64>().is_ok_and(|v| v.fract() == 0.0) => {}
+                _ => checked.push(item.clone()),
+            }
+        }
+        let before = self.diags.len();
+        self.check_slice_lit_items(&head, &checked);
+        for d in &mut self.diags[before..] {
+            d.notes.push(format!(
+                "why: the untyped slice literal's element type `{}` is inferred from its first item `{}`; spell the element type (`[]T{{...}}`) when the items differ",
+                head_text,
+                first.render()
+            ));
+        }
+    }
+
     fn check_map_lit_entries(
         &mut self,
         key_ty: &TypeExpr,
@@ -5600,5 +5692,32 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+}
+
+/// The element type hy-emit's `infer_slice_head` gives an untyped slice
+/// literal from its first item, or `None` when it infers none.
+fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
+    let span = first.span();
+    let named = |n: &str| Some(TypeExpr::Named { name: n.to_string(), span });
+    match first {
+        Expr::Paren { inner, .. } => untyped_slice_head_ty(inner),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => untyped_slice_head_ty(operand).filter(|t| {
+            matches!(t, TypeExpr::Named { name, .. } if name == "int" || name == "float64")
+        }),
+        Expr::Lit { kind, .. } => match kind {
+            LitKind::Int(_) => named("int"),
+            LitKind::Float(_) => named("float64"),
+            LitKind::Str(_) | LitKind::RawStr(_) => named("string"),
+            LitKind::Bool(_) => named("bool"),
+            LitKind::Char(_) => named("rune"),
+            LitKind::Nil => None,
+        },
+        Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+        _ => None,
     }
 }
