@@ -2971,6 +2971,18 @@ impl<'a> Collector<'a> {
                         }
                     }
                 }
+                // A method expression (`g := pt.get`) names the method through
+                // its TYPE, so the receiver becomes the first parameter: the
+                // function value takes `params + 1` arguments.
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    return OpKind::Fn(
+                        m.results
+                            .iter()
+                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .collect(),
+                        Some(m.params.len() + 1),
+                    );
+                }
                 OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
@@ -3691,6 +3703,82 @@ impl<'a> Collector<'a> {
 
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
+    /// `pt.get` where `pt` is a type name (not a local) that declares a
+    /// non-generic VALUE-receiver method `get`: a Go method expression whose
+    /// function value takes the receiver as its first argument. Pointer
+    /// receivers (`(*pt).get`) and generic methods fail open.
+    fn method_expr_decl(&self, base: &Expr, name: &str) -> Option<&'a FnDecl> {
+        let Expr::Ident { name: tn, .. } = unwrap_parens(base) else {
+            return None;
+        };
+        if self.lookup_kind(tn).is_some() || self.scopes.iter().any(|s| s.contains_key(tn)) {
+            return None;
+        }
+        let m: &'a FnDecl = *self.ck.method_decls.get(&(tn.clone(), name.to_string()))?;
+        if !m.type_params.is_empty() || m.receiver.as_ref().is_some_and(|r| r.is_pointer) {
+            return None;
+        }
+        Some(m)
+    }
+
+    /// #2834: a method-expression call `pt.get(recv, args...)` was
+    /// never checked (the type-name base has no kind, so every method/field
+    /// check failed open): `pt.get(1)` and `pt.get()` passed `hyb check` and
+    /// failed `go build` (`cannot use 1 ... as pt value in argument to
+    /// pt.get` / `not enough arguments in call to pt.get`). The receiver is
+    /// argument 0, the declared parameters follow.
+    fn check_method_expr_call(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        m: &'a FnDecl,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        let tn = base.render();
+        if args.iter().any(|a| a.spread) || self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let want = m.params.len() + 1;
+        let got = args.len();
+        if got != want {
+            self.emit_e1002(
+                span,
+                format!(
+                    "method expression `{}.{}` takes {} argument{} (the receiver, then the method's parameters) but is called with {} — Go refuses `{} arguments in call to {}.{}` (HYB-E1002)",
+                    tn,
+                    name,
+                    want,
+                    if want == 1 { "" } else { "s" },
+                    got,
+                    if got < want { "not enough" } else { "too many" },
+                    tn,
+                    name
+                ),
+                "a method expression `T.m` is a function whose first argument is the receiver: call it as `T.m(recv, args...)`, or call the method on a value: `recv.m(args...)`",
+            );
+            return;
+        }
+        let recv_kind = OpKind::Struct(Some(tn.clone()));
+        let recv = &args[0].value;
+        let got_kind = self.kind_of_expr(recv);
+        if kinds_conflict(&recv_kind, &got_kind) {
+            self.emit_e1002(
+                recv.span(),
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — the first argument of a method expression is the receiver (HYB-E1002)",
+                    recv.render(),
+                    got_kind.label(),
+                    tn,
+                    tn,
+                    name
+                ),
+                "pass a receiver value of the method's type as the first argument",
+            );
+        }
+        self.check_method_arg_types(&recv_kind, name, &args[1..]);
+    }
+
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
         // #880: a generic receiver carries its type arguments (`cache[int]`,
         // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
@@ -5884,6 +5972,10 @@ impl<'a> Collector<'a> {
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
                     }
+                }
+                if let Some(m) = self.method_expr_decl(base, name) {
+                    self.check_method_expr_call(base, name, m, args, span);
+                    return;
                 }
                 let bk = self.kind_of_expr(base);
                 // A method has no field entry, so resolve it before the field
