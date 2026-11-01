@@ -4322,10 +4322,12 @@ impl<'a> Collector<'a> {
             if ik == OpKind::Unknown || ik == expected || expected == OpKind::Interface {
                 continue;
             }
-            if expected == OpKind::Float
+            let is_untyped_int_to_float = expected == OpKind::Float
                 && ik == OpKind::Int
-                && self.is_untyped_int_const(item)
-            {
+                && self.is_untyped_int_const(item);
+            let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&expected, &ik);
+            if !conflict {
                 continue;
             }
             self.emit_e1002(
