@@ -32,13 +32,15 @@ fn new_array_unmoved_at_spawn_is_rejected_e3001_and_moved_cleanly_accepts() {
 
 #[test]
 fn json_set_consumes_handle_value_argument_and_rejects_post_use_or_loan_conflict() {
+    let r_ok = check("import \"rust/serde_json\"\nfn build() serde_json.value {\n v := serde_json.new_object()\n let arr := serde_json.new_array()\n arr.push_string(\"ada\")\n v.set(\"active\", arr)\n return v\n}\nfn main() {}\n");
+    assert_eq!(r_ok.verdict, Verdict::Accept, "expected 0 diagnostics, got {:?}", r_ok.diagnostics);
     let r_post_use = check("import \"rust/serde_json\"\nfn main() {\n v := serde_json.new_object()\n arr := serde_json.new_array()\n v.set(\"active\", arr)\n arr.push_string(\"use-after-consume\")\n}\n");
     assert_eq!(r_post_use.verdict, Verdict::Reject);
-    assert!(codes(&r_post_use).iter().any(|c| c == "HYB-E3003"));
+    assert_eq!(codes(&r_post_use), vec!["HYB-E3003"]);
     assert_eq!(r_post_use.diagnostics[0].tier0_rule.as_deref(), Some("A7"));
     let r_pkg_post_use = check("import \"rust/serde_json\"\nfn main() {\n v := serde_json.new_object()\n child := serde_json.new_object()\n serde_json.set(v, \"sub\", child)?\n child.set(\"k\", 1)?\n}\n");
     assert_eq!(r_pkg_post_use.verdict, Verdict::Reject);
-    assert!(codes(&r_pkg_post_use).iter().any(|c| c == "HYB-E3003"));
+    assert_eq!(codes(&r_pkg_post_use), vec!["HYB-E3003"]);
     let r_loan = check("import \"rust/serde_json\"\nfn main() {\n v := serde_json.new_object()\n child := serde_json.parse(`{\"items\": [1, 2]}`)?\n items := child.array(\"items\")?\n v.set(\"sub\", child)?\n fmt.println(items.len())\n}\n");
     assert_eq!(r_loan.verdict, Verdict::Reject);
     assert!(codes(&r_loan).iter().any(|c| c == "HYB-E3101"));

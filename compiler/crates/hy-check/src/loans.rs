@@ -2793,6 +2793,7 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
             Expr::Field { base, name, .. } => {
                 !matches!(crate::model::unwrap_parens(base), Expr::Ident { name: p, .. } if self.lookup_binding(st, p).is_none() && self.known_package(p))
+                    && receiver_type_name(&self.shape_of_expr(st, base)).is_none()
                     && (!matches!(name.as_str(), "insert" | "contains" | "remove" | "len" | "pop")
                         || self.method_decls.iter().any(|((_, m), _)| m == name))
             }
