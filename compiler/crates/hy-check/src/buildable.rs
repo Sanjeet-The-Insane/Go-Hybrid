@@ -2548,6 +2548,9 @@ impl<'a> Collector<'a> {
         fields: &[FieldInit],
         span: Span,
     ) {
+        for f in fields {
+            self.check_single_value_position(&f.value, "a struct literal field", false);
+        }
         let Some(t) = ty else { return };
         let sk = self.kind_of_ty(t, 0);
         let Some(full_name) = self.struct_name(&sk) else {
@@ -2591,6 +2594,9 @@ impl<'a> Collector<'a> {
                     "a struct literal may only name fields the struct declares",
                 ),
                 Some((_, fty)) => {
+                    if self.non_single_value_count(&f.value).is_some() {
+                        continue;
+                    }
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
                     let is_untyped_int_to_float = want == OpKind::Float
@@ -4269,6 +4275,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "an array literal element", false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -4277,6 +4286,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if self.non_single_value_count(item).is_some() {
                 continue;
             }
             if let Expr::SliceLit {
@@ -4330,6 +4342,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "a slice literal element", false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -4338,6 +4353,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if self.non_single_value_count(item).is_some() {
                 continue;
             }
             if let Expr::SliceLit {
@@ -4477,12 +4495,16 @@ impl<'a> Collector<'a> {
         val_ty: &TypeExpr,
         entries: &[(Expr, Expr)],
     ) {
+        for (k, v) in entries {
+            self.check_single_value_position(k, "a map key", false);
+            self.check_single_value_position(v, "a map value", false);
+        }
         let resolved_key = self.ck.resolve_type_alias(key_ty);
         let exp_key = self.kind_of_ty(&resolved_key, 0);
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface {
+            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface && self.non_single_value_count(k).is_none() {
                 let kk = self.kind_of_expr(k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
@@ -4505,7 +4527,7 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface {
+            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface && self.non_single_value_count(v).is_none() {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
