@@ -1522,6 +1522,19 @@ impl<'a> Collector<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Ident { name, span } => {
+                // #2710: the blank identifier `_` discards a value; it is not
+                // itself a value. Go refuses to read it (`cannot use _ as value
+                // or type`). This arm is only reached for VALUE positions —
+                // assignment/declaration targets go through `place`/`local`,
+                // which never route the target identifier through `expr`, so
+                // `_ = v` and `x, _ := f()` stay legal.
+                if name == "_" {
+                    self.emit_e1002(
+                        *span,
+                        "cannot use `_` as a value — Go refuses `cannot use _ as value or type` (HYB-E1002)".to_string(),
+                        "the blank identifier `_` may only appear on the left-hand side of an assignment or declaration, to discard a value",
+                    );
+                }
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
