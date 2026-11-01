@@ -276,9 +276,17 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
         // Pointer targets and arguments: Go only converts between pointers.
+        // Direct pointer-to-pointer conversions require identical base types
+        // (Go spec §Conversions).
         // A pointer cannot convert to or from any non-pointer type; the one
         // exception is an interface target (`any(p)`), handled above.
-        (Pointer(_), Pointer(_)) => false,
+        (Pointer(a), Pointer(b)) => {
+            if matches!(**a, Unknown | Struct(None)) || matches!(**b, Unknown | Struct(None)) {
+                false
+            } else {
+                a != b
+            }
+        }
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
