@@ -881,6 +881,19 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2782 — two TYPED values whose canonical numeric types differ (`int`
+    /// vs `int64`, `float64` vs `float32`). The scalar helpers return `None`
+    /// for an untyped constant, so `x: 1` / `y: 3.14` stay assignable, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_names_conflict(
+        &self,
+        want: Option<&'static str>,
+        got: Option<&'static str>,
+    ) -> bool {
+        matches!((want, got), (Some(w), Some(g)) if w != g)
+    }
+
     /// #1031 — the type a `x := v` / `var x = v` binding takes from its
     /// initializer: Go's default type for an untyped numeric literal (`int`,
     /// `float64`), or the initializer's own type when it is typed.
@@ -3122,8 +3135,15 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = want == OpKind::Float
                         && got == OpKind::Int
                         && self.is_untyped_int_const(&f.value);
+                    // #2782: `want`/`got` both collapse to `Int`/`Float`, but
+                    // the field's own Go spelling may differ from the typed
+                    // initializer's (`int` into `int64`, `float64` into
+                    // `float32`) — Go refuses that in a struct literal.
+                    let scalar_mismatch =
+                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
-                        || kinds_conflict(&want, &got);
+                        || kinds_conflict(&want, &got)
+                        || scalar_mismatch;
                     if conflict {
                         self.emit_e1002(
                             f.value.span(),
