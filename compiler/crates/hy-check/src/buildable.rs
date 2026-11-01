@@ -3325,6 +3325,90 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// SPEC-LANGUAGE §4 G5 — call-site type inference follows Go's rules:
+    /// a type argument is inferred only from the argument types, so a type
+    /// parameter that appears in no parameter type (`fn mk[t any]() t`,
+    /// `fn conv[a any, b any](x a) b`) cannot be inferred from a bare call
+    /// `mk()` / `conv(1)`, whatever the result is assigned to. Go refuses the
+    /// emitted call with `in call to mk, cannot infer t`; the explicit form
+    /// `mk[int]()` (an `Expr::Index` callee) never reaches this check.
+    ///
+    /// Only the MVP constraints (`any`, `comparable`; G3) are handled: with
+    /// a core-type constraint Go could infer a parameter from another
+    /// parameter's constraint, so any other constraint skips the check.
+    fn check_uninferable_type_params(&mut self, name: &str, f: &FnDecl, span: Span) {
+        // An explicit instantiation reaches here folded to `mk[int]`.
+        if f.receiver.is_some() || name.contains('[') {
+            return;
+        }
+        if f.type_params.iter().any(|tp| {
+            !matches!(
+                tp.constraint.as_deref(),
+                None | Some("any") | Some("comparable")
+            )
+        }) {
+            return;
+        }
+        let mut mentioned: HashSet<String> = HashSet::new();
+        // `TypeExpr::render` folds fn types to `fn`, so walk the tree; a
+        // named type keeps its type arguments in the name (`box[t]`).
+        fn collect(ty: &TypeExpr, out: &mut HashSet<String>) {
+            match ty {
+                TypeExpr::Named { name, .. } => {
+                    for tok in name.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if !tok.is_empty() {
+                            out.insert(tok.to_string());
+                        }
+                    }
+                }
+                TypeExpr::Pointer { to: e, .. }
+                | TypeExpr::Slice { elem: e, .. }
+                | TypeExpr::Array { elem: e, .. }
+                | TypeExpr::Chan { elem: e, .. }
+                | TypeExpr::Option { elem: e, .. } => collect(e, out),
+                TypeExpr::Map { key, value, .. } => {
+                    collect(key, out);
+                    collect(value, out);
+                }
+                TypeExpr::Fn {
+                    params, results, ..
+                } => {
+                    for p in params {
+                        collect(&p.ty, out);
+                    }
+                    for r in results {
+                        collect(r, out);
+                    }
+                }
+            }
+        }
+        for p in &f.params {
+            collect(&p.ty, &mut mentioned);
+        }
+        let missing: Vec<&str> = f
+            .type_params
+            .iter()
+            .map(|tp| tp.name.as_str())
+            .filter(|n| !mentioned.contains(*n))
+            .collect();
+        let Some(first) = missing.first() else {
+            return;
+        };
+        let list = missing
+            .iter()
+            .map(|n| format!("`{}`", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot infer type parameter {} of `{}`: it appears in no parameter type — Go refuses `in call to {}, cannot infer {}` (HYB-E1002)",
+                list, name, name, first
+            ),
+            "instantiate explicitly (`f[int](...)`): Go infers type arguments only from argument types (SPEC-LANGUAGE §4 G5), never from the result or the assignment target",
+        );
+    }
+
     /// #577 C9 — a call to a top-level `fn` must pass exactly as many
     /// arguments as the declaration has parameters. Go refuses the emitted
     /// call otherwise (`not enough arguments` / `too many arguments`), so an
@@ -3357,6 +3441,7 @@ impl<'a> Collector<'a> {
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
+            self.check_uninferable_type_params(name, f, span);
             return;
         }
         // A lone multi-value call IS the whole argument list and expands to one
