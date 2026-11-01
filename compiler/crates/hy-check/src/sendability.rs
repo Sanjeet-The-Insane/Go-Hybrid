@@ -157,7 +157,50 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
+            shape if self.shape_holds_unproven_type_param(shape, &mut Vec::new()) => {
+                Outcome::Unproven(UnprovenInfo {
+                    value: name.to_string(),
+                    reason: "it carries an unresolved generic type parameter whose sendability class cannot be proven at this boundary (O4.9)".to_string(),
+                })
+            }
             _ => Outcome::Ok,
+        }
+    }
+
+    /// True when a composite shape carries a generic struct with an unbound /
+    /// unresolved type parameter (`holder[t]` inside `fn f[t](h holder[t])` or
+    /// uninstantiated `holder`). Moving bare `x: t` already fails closed with
+    /// HYB-E3005 (`O4.9`); wrapping `t` inside a generic struct must not
+    /// launder an unproven type parameter across a task boundary (#2483).
+    pub(crate) fn shape_holds_unproven_type_param(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_unproven_type_param(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_unproven_type_param(k, seen)
+                    || self.shape_holds_unproven_type_param(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                if self.struct_has_unresolved_type_param(sname) {
+                    return true;
+                }
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
+                    return false;
+                };
+                fields.iter().any(|(_, ty)| {
+                    self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
+                })
+            }
+            _ => false,
         }
     }
 
@@ -180,7 +223,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -212,7 +255,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -239,7 +282,10 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                if self.struct_has_unresolved_type_param(sname) {
+                    return false;
+                }
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -688,7 +734,8 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 let f = recv_base.and_then(|rb| {
-                    self.method_decls.get(&(rb, method_name.clone())).copied()
+                    let base = Self::base_named_type_str(&rb).to_string();
+                    self.method_decls.get(&(base, method_name.clone())).copied()
                 })?;
                 if f.params.len() != argc {
                     return None;
@@ -1035,7 +1082,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }
                 }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
+                    if let Some(def) = self.struct_fields_for_sname(&sname) {
                         for f in fields {
                             if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
                                 if Checker::is_nil_literal(&f.value) {
@@ -2355,7 +2402,7 @@ impl<'a> Checker<'a> {
         cur
     }
 
-    fn struct_fields_for_type(
+    pub(crate) fn struct_fields_for_type(
         &self,
         ty: &hy_syntax::TypeExpr,
     ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
@@ -2363,15 +2410,19 @@ impl<'a> Checker<'a> {
         let hy_syntax::TypeExpr::Named { name, .. } = &peeled else {
             return None;
         };
+        self.struct_fields_for_sname(name)
+    }
+
+    pub(crate) fn struct_fields_for_sname(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
         let sname = Self::base_named_type_str(name);
         let fields = self.structs.get(sname)?.clone();
         if let Some((_, type_args)) = Self::parse_generic_type_args(name) {
-            if let Some(sdecl) = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Struct(s) if s.name == sname => Some(s),
-                _ => None,
-            }) {
+            if let Some(tparams) = self.struct_type_params.get(sname) {
                 let mut subst = std::collections::HashMap::new();
-                for (tp, arg) in sdecl.type_params.iter().zip(type_args.iter()) {
+                for (tp, arg) in tparams.iter().zip(type_args.iter()) {
                     subst.insert(tp.name.clone(), arg.clone());
                 }
                 if !subst.is_empty() {
@@ -2385,6 +2436,26 @@ impl<'a> Checker<'a> {
             }
         }
         Some(fields)
+    }
+
+    pub(crate) fn struct_has_unresolved_type_param(&self, name: &str) -> bool {
+        let sname = Self::base_named_type_str(name);
+        let Some(tparams) = self.struct_type_params.get(sname) else {
+            return false;
+        };
+        if tparams.is_empty() {
+            return false;
+        }
+        let Some((_, type_args)) = Self::parse_generic_type_args(name) else {
+            return true;
+        };
+        if type_args.len() < tparams.len() {
+            return true;
+        }
+        type_args
+            .iter()
+            .take(tparams.len())
+            .any(|arg| matches!(self.shape_of_type(arg), TypeShape::Unknown))
     }
 
     fn infer_type_param_bindings(
