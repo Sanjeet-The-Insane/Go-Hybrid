@@ -3204,6 +3204,53 @@ impl<'a> Collector<'a> {
     /// while a builtin name (`len`, `append`, `make`, ...) is not a type and
     /// resolves to `Unknown`, so builtins keep their own arity rules
     /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
+    /// #2811 — the element spelling of a slice TYPE NAME (alias resolution
+    /// included), e.g. `my_int64_slice` → `int64`. `None` when the name does
+    /// not resolve to a slice type, which fails open.
+    fn named_slice_element_name(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        let ty = self.ck.type_aliases.get(base)?;
+        match self.ck.resolve_type_alias(ty) {
+            hy_syntax::TypeExpr::Slice { elem, .. } => Some(elem.render()),
+            _ => None,
+        }
+    }
+
+    /// #2811 — a `string`↔slice conversion whose element is a KNOWN numeric
+    /// type other than `byte`/`rune`. Go's conversion rules admit only
+    /// `[]byte`/`[]uint8` and `[]rune`/`[]int32`; `OpKind::Int` collapses every
+    /// integer width, so `string([]int64)` and `my_int64_slice(s)` passed the
+    /// kind check and failed `go build` (`cannot convert ... to type string`).
+    ///
+    /// Only a KNOWN numeric spelling that is not `uint8`/`int32` counts: a
+    /// user type, an alias of an alias or an unresolved spelling fails open,
+    /// and the non-`Int` element kinds (`[]string`, `[]bool`, `[]float64`) are
+    /// already rejected by `conversion_kinds_conflict`.
+    fn string_slice_conversion_element_mismatch(
+        &self,
+        name: &str,
+        target: &OpKind,
+        arg: &Expr,
+        arg_kind: &OpKind,
+    ) -> bool {
+        let elem = if matches!(target, OpKind::Str) {
+            // `string(xs)` — the OPERAND carries the slice spelling.
+            if !matches!(arg_kind, OpKind::Slice(_) | OpKind::Array(_)) {
+                return false;
+            }
+            self.slice_element_type_name(arg)
+        } else if matches!(arg_kind, OpKind::Str) && matches!(target, OpKind::Slice(_)) {
+            // `T(s)` where `T` names a slice type.
+            self.named_slice_element_name(name)
+        } else {
+            return false;
+        };
+        matches!(
+            elem.as_deref().and_then(canonical_numeric_name),
+            Some(x) if x != "uint8" && x != "int32"
+        )
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -3225,7 +3272,10 @@ impl<'a> Collector<'a> {
         let arg = &args[0].value;
         self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
         let arg_k = self.kind_of_expr(arg);
-        if conversion_kinds_conflict(&k, &arg_k) {
+        // #2811: `string`↔slice conversions are restricted to byte/rune
+        // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
+        let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
+        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
