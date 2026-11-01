@@ -2981,6 +2981,21 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
+        // #2701: Hybrid declares no variadic parameters (`parse_params` never
+        // accepts `...T`), so a spread argument on a user function is never
+        // buildable — Go refuses `cannot use ... in call to non-variadic <f>`.
+        // The `...` spread form is only legal on the variadic built-in `append`.
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; Hybrid declares no variadic parameters",
+            );
+            return;
+        }
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
@@ -3043,6 +3058,19 @@ impl<'a> Collector<'a> {
         let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
             return;
         };
+        // #2701: a method is never variadic in Hybrid, so a spread argument is
+        // never buildable — Go refuses `cannot use ... in call to non-variadic`.
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic method `{}.{}` — Go refuses `cannot use ... in call to non-variadic {}.{}` (HYB-E1002)",
+                    sn, name, sn, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; methods are never variadic",
+            );
+            return;
+        }
         if !m.type_params.is_empty() {
             return;
         }
@@ -5170,6 +5198,25 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
+        // #2701: among the built-ins only `append` is variadic; every other
+        // built-in rejects the `...` spread form (`invalid use of ... with
+        // built-in <name>`). `append` is handled in its own arm below, where a
+        // spread argument is legal.
+        if matches!(
+            name,
+            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+        ) && args.iter().any(|a| a.spread)
+        {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic built-in `{}` — Go refuses `invalid use of ... with built-in {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`",
+            );
+            return;
+        }
         match name {
             "make" => {
                 for arg in args.iter().skip(1) {
