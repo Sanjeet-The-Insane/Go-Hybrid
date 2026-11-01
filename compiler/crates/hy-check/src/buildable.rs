@@ -5172,6 +5172,31 @@ impl<'a> Collector<'a> {
                         "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
                     );
                 }
+                // #2725: a slice-to-slice conversion must keep the element type
+                // identical (Go §Conversions). `conversion_kinds_conflict` already
+                // has that arm for the *named* conversion path, but a slice-literal
+                // conversion (`[]string(xs)`) reaches HERE instead, and the checks
+                // above only verified the operand WAS a slice. So `[]string([]int)`,
+                // `[]int([]float64)` and `[]bool([]int)` were accepted and failed
+                // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
+                if let OpKind::Slice(arg_elem) = &ak {
+                    let target_elem = self.kind_of_ty(elem_ty, 0);
+                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` — Go refuses `cannot convert {} (variable of type {}) to type {}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str,
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "a slice conversion requires the two slice types to have identical element types",
+                        );
+                    }
+                }
             }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
