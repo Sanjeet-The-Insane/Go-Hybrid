@@ -1607,7 +1607,17 @@ impl<'a> Collector<'a> {
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
-                for v in values {
+                for (i, v) in values.iter().enumerate() {
+                    // SPEC E3 zero-value return placeholder (`return _, err`):
+                    // in a function whose results end in `error`, `hy-emit`
+                    // lowers `_` in a return slot (`i < fn_results.len()`) to
+                    // the result type's zero value (`examples/09-go-imports-hybrid`).
+                    if self.fn_results_error_tail
+                        && i < self.fn_results.len()
+                        && matches!(v, Expr::Ident { name, .. } if name == "_")
+                    {
+                        continue;
+                    }
                     self.expr(v);
                 }
                 self.check_return(values, *span);
