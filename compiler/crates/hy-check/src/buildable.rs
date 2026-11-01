@@ -3692,7 +3692,20 @@ impl<'a> Collector<'a> {
                         "untyped nil cannot be compared with untyped nil",
                     );
                 } else if !lhs_is_nil && !rhs_is_nil {
-                    if equality_kinds_conflict(&lk, &rk) {
+                    // #2719: a typed integer and a typed float are different
+                    // types, so Go refuses `a == b` (`mismatched types int and
+                    // float64`). An untyped numeric constant adapts to the other
+                    // operand (`int_var == 1.0` / `float_var == 1` build), so the
+                    // conflict needs the side that must convert to be a genuine
+                    // non-constant value. Mirrors the arithmetic and ordered-
+                    // comparison arms above.
+                    let int_float_conflict = (lk == OpKind::Float
+                        && rk == OpKind::Int
+                        && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
                         self.emit_e1002(
                             span,
                             format!(
