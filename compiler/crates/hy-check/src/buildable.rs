@@ -5008,6 +5008,25 @@ impl<'a> Collector<'a> {
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
+            "make" => {
+                for arg in args.iter().skip(1) {
+                    if matches!(unwrap_parens(&arg.value), Expr::Lit { .. }) {
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(&arg.value);
+                    if ak != OpKind::Unknown && ak != OpKind::Int {
+                        self.emit_e1002(
+                            arg.value.span(),
+                            format!(
+                                "non-integer size argument `{}` (type `{}`) in `make` — Go refuses `cannot use ... as int value in make` (HYB-E1002)",
+                                arg.value.render(),
+                                ak.label()
+                            ),
+                            "size arguments in `make` (len, cap, channel buffer size) must be integer types",
+                        );
+                    }
+                }
+            }
             "len" => {
                 if args.len() != 1 {
                     return; // arity handled by builtins.rs
