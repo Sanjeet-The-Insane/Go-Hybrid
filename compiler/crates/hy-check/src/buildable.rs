@@ -219,6 +219,32 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Symmetrical conflict check for built-in `copy(dst, src)` element types.
+///
+/// In Go, `copy(dst, src)` requires both slices to have identical element types
+/// (except for copying a string into a byte slice).
+/// Unlike assignment or return, `copy` operates on existing slice values where untyped
+/// constant adaptability does not apply: `copy([]float64, []int)` and `copy([]any, []int)`
+/// are compile-time errors in Go.
+fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    use OpKind::*;
+    match (a, b) {
+        // Fail-open: unresolved kinds carry no claim.
+        (Unknown, _) | (_, Unknown) => false,
+        // Struct whose name did not resolve is not evidence of mismatch.
+        (Struct(None), _) | (_, Struct(None)) => false,
+        (a, b) if a == b => false,
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
+            copy_element_kinds_conflict(a, b)
+        }
+        (Map(k1, v1), Map(k2, v2)) => {
+            copy_element_kinds_conflict(k1, k2) || copy_element_kinds_conflict(v1, v2)
+        }
+        (Fn(..), Fn(..)) => false,
+        _ => true,
+    }
+}
+
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
 fn is_non_nilable(k: &OpKind) -> bool {
@@ -5192,7 +5218,7 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        if copy_element_kinds_conflict(dst_elem, src_elem) {
                             self.emit_e1002(
                                 span,
                                 format!(
