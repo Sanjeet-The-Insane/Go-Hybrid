@@ -354,7 +354,7 @@ impl Emitter {
                     if let Some(n) = &r.name {
                         if n != "_" {
                             self.shadow_local_name(n);
-                            if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                            if self.is_pointer_ty(&r.ty) {
                                 self.pointer_vars.insert(n.clone());
                             }
                             if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
@@ -367,7 +367,7 @@ impl Emitter {
                 for (i, p) in params.iter().enumerate() {
                     if p.name != "_" {
                         self.shadow_local_name(&p.name);
-                        if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                        if self.is_pointer_ty(&p.ty) {
                             self.pointer_vars.insert(p.name.clone());
                         }
                     }
