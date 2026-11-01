@@ -987,7 +987,6 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                eprintln!("DEBUG: want={:?}, vk={:?}, is_untyped={}", want, vk, self.is_untyped_int_const(&l.values[0]));
                 let int_float_conflict = want == OpKind::Float
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
