@@ -4528,8 +4528,10 @@ impl<'a> Collector<'a> {
                     BinOp::Shl => "<<",
                     _ => ">>",
                 };
+                let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
                 if !matches!(lk, OpKind::Unknown | OpKind::Int)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int)
+                    || (!is_shift && self.scalar_conflict(lhs, rhs))
                 {
                     self.emit_e1002(
                         span,
@@ -4643,7 +4645,11 @@ impl<'a> Collector<'a> {
                             && self.is_untyped_int_const(v);
                         let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                             || kinds_conflict(&tpk, &vk);
-                        if conflict {
+                        let scalar_mismatch = matches!(
+                            (self.place_scalar(t), self.typed_value_scalar(v)),
+                            (Some(tp), Some(vp)) if tp != vp
+                        );
+                        if conflict || scalar_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -4720,7 +4726,11 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&tk, &vk);
-                if !t_ok || !v_ok || mismatch || conflict {
+                let scalar_mismatch = matches!(
+                    (self.place_scalar(target), self.typed_value_scalar(val)),
+                    (Some(tp), Some(vp)) if tp != vp
+                );
+                if !t_ok || !v_ok || mismatch || conflict || scalar_mismatch {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4764,9 +4774,14 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&tk, &vk);
+                let scalar_mismatch = matches!(
+                    (self.place_scalar(target), self.typed_value_scalar(val)),
+                    (Some(tp), Some(vp)) if tp != vp
+                );
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || conflict
+                    || scalar_mismatch
                 {
                     self.emit_e1002(
                         span,
@@ -4810,8 +4825,14 @@ impl<'a> Collector<'a> {
                     );
                 }
                 let vk = self.kind_of_expr(val);
+                let is_shift = matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign);
+                let scalar_mismatch = !is_shift && matches!(
+                    (self.place_scalar(target), self.typed_value_scalar(val)),
+                    (Some(tp), Some(vp)) if tp != vp
+                );
                 if !matches!(tk, OpKind::Unknown | OpKind::Int)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int)
+                    || scalar_mismatch
                 {
                     self.emit_e1002(
                         span,
