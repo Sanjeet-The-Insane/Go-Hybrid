@@ -3791,6 +3791,17 @@ impl<'a> Collector<'a> {
     ///
     /// Fail-open: an `Unknown` first argument or an `Unknown` element kind
     /// carries no claim, so only a proven mismatch is reported.
+    /// #2796 — the destination element type of `append`'s first argument,
+    /// canonicalised to its Go numeric name (`i64` → `int64`, `f32` →
+    /// `float32`, `byte` → `uint8`) so it can be compared against
+    /// `typed_value_scalar`. `None` when the spelling is not a predeclared
+    /// numeric type, so user types and unknown shapes fail open.
+    fn append_dest_scalar(&self, first: &Expr) -> Option<&'static str> {
+        self.slice_element_type_name(first)
+            .as_deref()
+            .and_then(canonical_numeric_name)
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -3886,14 +3897,35 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict {
+            // #2796: `OpKind` collapses every integer width into `Int` and
+            // both float widths into `Float`, so a TYPED element of another
+            // concrete numeric type (`int` into `[]int64`, `float32` into
+            // `[]float64`) passed here and failed `go build` (`cannot use y
+            // (variable of type int) as int64 value in argument to append`).
+            let dst_elem_ty = self.slice_element_type_name(&first.value);
+            let dst_scalar = self.append_dest_scalar(&first.value);
+            let got_scalar = self.typed_value_scalar(&extra.value);
+            let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+                let dst_label = match dst_elem_ty.as_deref() {
+                    Some(d) => format!("[]{}", d),
+                    None => self.kind_of_expr(&first.value).label().to_string(),
+                };
+                let got_label = match got_scalar {
+                    Some(s) => s.to_string(),
+                    None => got.label().to_string(),
+                };
+                let elem_label = match dst_scalar {
+                    Some(d) => d.to_string(),
+                    None => elem.label().to_string(),
+                };
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
                         "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
-                        got.label(),
-                        self.kind_of_expr(&first.value).label(),
-                        elem.label()
+                        got_label,
+                        dst_label,
+                        elem_label
                     ),
                     "the appended values must be assignable to the slice's element type",
                 );
