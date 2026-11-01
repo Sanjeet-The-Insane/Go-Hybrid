@@ -596,7 +596,10 @@ impl<'a> Collector<'a> {
         };
         let want = self.kind_of_named(&elem, 0);
         let got = self.kind_of_expr(&args[0].value);
-        if kinds_conflict(&want, &got) {
+        let int_to_float_conflict = want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(&args[0].value);
+        if kinds_conflict(&want, &got) || int_to_float_conflict {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
@@ -5075,7 +5078,10 @@ impl<'a> Collector<'a> {
                         if let Some(elem) = self.set_elem_of_expr(map_arg) {
                             let want = self.kind_of_named(&elem, 0);
                             let got = self.kind_of_expr(key_arg);
-                            if kinds_conflict(&want, &got) {
+                            let int_to_float_conflict = want == OpKind::Float
+                                && got == OpKind::Int
+                                && !self.is_untyped_int_const(key_arg);
+                            if kinds_conflict(&want, &got) || int_to_float_conflict {
                                 self.emit_e2005(
                                     span,
                                     format!(
