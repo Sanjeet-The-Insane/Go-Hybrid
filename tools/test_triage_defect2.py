@@ -169,6 +169,68 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("| +15 | 1 | Y | 2 | 8 |", board)
         self.assertNotIn("Incomplete scans", board)
 
+    def test_upstream_shared_merge_base_is_fetched_once_across_workers(self):
+        main_compare = "/repos/offline/repo/compare/%s...%s" % ("c" * 40, MAIN)
+
+        def overlap(path):
+            if path == main_compare:
+                return Response({"files": [{"filename": "tests/p1.hy"}, {}]})
+
+        rows, _, transport, _ = self.scan([pr(n) for n in range(1, 13)],
+                                          jobs=4, override=overlap)
+        self.assertEqual(transport.paths.count(main_compare), 1)
+        self.assertEqual(len(transport.deep), 37)
+        self.assertEqual(next(row for row in rows if row["number"] == 1)["overlap_risk"],
+                         ["tests/p1.hy"])
+        self.assertTrue(all(not row["overlap_risk"] for row in rows if row["number"] != 1))
+
+    def test_upstream_head_equal_to_main_skips_compare(self):
+        rows, _, transport, _ = self.scan([pr(1, head={"sha": MAIN})])
+        self.assertEqual(len(transport.deep), 2)
+        self.assertFalse(any("/compare/" in path for path in transport.paths))
+        self.assertEqual(rows[0]["behind_by"], 0)
+        self.assertEqual(rows[0]["overlap_risk"], [])
+
+    def test_current_labels_are_fresh_on_cache_hit(self):
+        rows, _, _, _ = self.scan([pr(1, labels=[{"name": "before"}])])
+        self.assertEqual(rows[0]["current_labels"], ["before"])
+        self.save_cache(rows)
+        rows, _, transport, _ = self.scan([pr(1, labels=[{"name": "after"}])])
+        self.assertEqual(transport.deep, [])
+        self.assertEqual(rows[0]["current_labels"], ["after"])
+
+    def test_current_labels_survive_draft_and_degraded_paths(self):
+        def limited(path):
+            if path.endswith("/pulls/2"):
+                return Response({}, remaining=149)
+
+        rows, _, _, _ = self.scan([
+            pr(1, draft=True, labels=[{"name": "draft-label"}]),
+            pr(2, labels=[{"name": "ready-label"}]),
+        ], override=limited)
+        by_number = {row["number"]: row for row in rows}
+        self.assertEqual(by_number[1]["current_labels"], ["draft-label"])
+        self.assertEqual(by_number[2]["current_labels"], ["ready-label"])
+        self.assertTrue(by_number[2]["degraded"])
+
+    def test_shared_merge_base_rate_guard_does_not_cache_empty_success(self):
+        main_compare = "/repos/offline/repo/compare/%s...%s" % ("c" * 40, MAIN)
+
+        def limited(path):
+            if path == main_compare:
+                return Response({}, remaining=149)
+
+        rows, _, transport, _ = self.scan([pr(1), pr(2)], override=limited)
+        self.assertEqual(transport.paths.count(main_compare), 1)
+        self.assertTrue(all(row.get("degraded") for row in rows))
+        for row in rows:
+            self.assert_unknown(row)
+        self.save_cache(rows)
+        recovered, _, transport, _ = self.scan([pr(1), pr(2)])
+        self.assertEqual(transport.paths.count(main_compare), 1)
+        self.assertTrue(all(not row.get("degraded") for row in recovered))
+        self.assertTrue(all(row["behind_by"] == 2 for row in recovered))
+
     def test_cache_reuses_only_measurements_not_classification(self):
         items, _, _, _ = self.scan([pr(1)])
         items[0].update(dup_of=999, dup_members=[998], bucket_new=True,
